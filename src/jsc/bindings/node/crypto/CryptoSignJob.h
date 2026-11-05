@@ -50,6 +50,7 @@ public:
         JSValue algorithmValue, JSValue dataValue, JSValue keyValue, JSValue signatureValue, JSValue callbackValue);
 
     void runTask(JSC::JSGlobalObject*);
+    bool runOnRind();
     JSCallbackArgs runFromJS(JSC::JSGlobalObject*);
     void deinit();
 

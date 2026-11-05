@@ -18,6 +18,9 @@ pub(crate) mod hmac;
 #[path = "PBKDF2.rs"]
 pub(crate) mod pbkdf2;
 
+#[path = "rind.rs"]
+pub(crate) mod rind;
+
 #[path = "boringssl_jsc.rs"]
 pub(crate) mod boringssl_jsc;
 

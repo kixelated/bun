@@ -431,6 +431,68 @@ describe("crypto.createSign()/.verifySign()", () => {
   );
 });
 
+describe("crypto.sign()/crypto.verify() interoperate with OpenSSL", () => {
+  // Signatures from OpenSSL (Python's `cryptography`), an implementation independent of Bun's.
+  const message = Buffer.from("rind in bun");
+  const ed25519 = { jwk: {"kty": "OKP", "crv": "Ed25519", "x": "ipQvnZFEoK-oWH3L1NXl3Dnz17cRrzOV-XM-1N3Ry_I", "d": "9ajlRlaDZOSDM2GUGlL7cQJPybwA7hGdZFiIM-dxVuc"}, signature: "9a8cda00c7a90caf3d8ac3140ba92c48129cac6e3ef646edef9973e82c5220aec5ac070e7b984ae090a2de03ad6fc803440f9596c6754bef0b3a0d98b4cbec0d" };
+  const ecdsa = [
+    { curve: "P-384", hash: "sha384", jwk: {"kty": "EC", "crv": "P-384", "x": "Ih8bfHO_FwLZxv0hpwZFcK_5vrRNn63emOwqgMSRuCJwlKehp-EcsMF4bzwvcDPU", "y": "l29hu1iSPkoaTa5yjXC2NIf7h3C1Bx82QZQ4uPxodumhqrYdfMTQjyhXcSkwhjNG", "d": "AcvZnjuooXTtZzn3ZZU2LMXLjb1qgdOCX2gXl1WkBwr_7_Gc6rGHQmZYPQTbZbU-"}, der: "3065023100cb40240d092113e2785f363ec261a8f2bc59a001341625b7006a2f239800799239417ab1d1bf86c47d0cdeb87bc4bcab023058819ccf512a863aa042bbda2c8be86993a23a815306c8dbf735c598e02488da91265386c854e832d6b8c8a76d8a0d35", p1363: "cb40240d092113e2785f363ec261a8f2bc59a001341625b7006a2f239800799239417ab1d1bf86c47d0cdeb87bc4bcab58819ccf512a863aa042bbda2c8be86993a23a815306c8dbf735c598e02488da91265386c854e832d6b8c8a76d8a0d35" },
+    { curve: "P-521", hash: "sha512", jwk: {"kty": "EC", "crv": "P-521", "x": "Ae7p4LIan2XCk-qFbp7JUsZBUnx5Cy34iuZffYwIJQ92p4CKCgDKC3KUuvTNPCLVJz3RFqCBWGaNAkYfpXGv77P0", "y": "AYAVZnnQTnBeif72K13AUxE_st574OqmU-ZJkcIHGpFn0nEmMVfaI05W0mGHXdI0zebQNx7gF_kfOMknAu7ix8b0", "d": "AKCLThTsPNIdEb5mwTCu6J-8YxoGk9dgklIaQabnOdZa4exTHlQGmNiRh-mUGh5MlW4daw8ML4DIxigXRaktkFqE"}, der: "30818702420112108d7b3b8e4967570e0bad202151732f61f84300c18588dd8116cb712f0d84099f60bdc5de785c078cdb42b037f60ca52ae95f67e141af94dc36650c5fc0f47e02411766c45fb151c31d8896742820c2a3338a505ff45a314ac2ce23cac365114d783e7989058a8b104e22f4b8b099a4183133786c3f5cfa2a7ecdd19992c9b186944c", p1363: "0112108d7b3b8e4967570e0bad202151732f61f84300c18588dd8116cb712f0d84099f60bdc5de785c078cdb42b037f60ca52ae95f67e141af94dc36650c5fc0f47e001766c45fb151c31d8896742820c2a3338a505ff45a314ac2ce23cac365114d783e7989058a8b104e22f4b8b099a4183133786c3f5cfa2a7ecdd19992c9b186944c" },
+  ];
+
+  it("Ed25519", () => {
+    const privateKey = crypto.createPrivateKey({ key: ed25519.jwk, format: "jwk" });
+    const publicKey = crypto.createPublicKey(privateKey);
+    const expected = Buffer.from(ed25519.signature, "hex");
+    expect(crypto.sign(null, message, privateKey)).toEqual(expected);
+    expect(crypto.verify(null, message, publicKey, expected)).toBe(true);
+    expect(crypto.verify(null, message, privateKey, expected)).toBe(true);
+    const tampered = Buffer.from(expected);
+    tampered[3] ^= 1;
+    expect(crypto.verify(null, message, publicKey, tampered)).toBe(false);
+    expect(crypto.verify(null, message, publicKey, expected.subarray(1))).toBe(false);
+  });
+
+  for (const { curve, hash, jwk, der, p1363 } of ecdsa) {
+    it(`ECDSA ${curve} with ${hash}`, () => {
+      const privateKey = crypto.createPrivateKey({ key: jwk, format: "jwk" });
+      const publicKey = crypto.createPublicKey(privateKey);
+      const derSig = Buffer.from(der, "hex");
+      const p1363Sig = Buffer.from(p1363, "hex");
+      expect(crypto.verify(hash, message, publicKey, derSig)).toBe(true);
+      expect(crypto.verify(hash, message, privateKey, derSig)).toBe(true);
+      expect(crypto.verify(hash, message, { key: publicKey, dsaEncoding: "ieee-p1363" }, p1363Sig)).toBe(true);
+
+      const tampered = Buffer.from(derSig);
+      tampered[tampered.length - 1] ^= 1;
+      expect(crypto.verify(hash, message, publicKey, tampered)).toBe(false);
+      expect(crypto.verify(hash, message, publicKey, Buffer.concat([derSig, Buffer.from([0])]))).toBe(false);
+      // DER with a needless leading zero on r decodes to the same r, but is not DER.
+      const rLen = derSig[derSig[1] & 0x80 ? 4 : 3];
+      const rStart = derSig[1] & 0x80 ? 5 : 4;
+      const r = derSig.subarray(rStart, rStart + rLen);
+      const rest = derSig.subarray(rStart + rLen);
+      const body = Buffer.concat([Buffer.from([0x02, rLen + 1, 0]), r, rest]);
+      const lenBytes = body.length < 0x80 ? Buffer.from([body.length]) : Buffer.from([0x81, body.length]);
+      const padded = Buffer.concat([Buffer.from([0x30]), lenBytes, body]);
+      expect(crypto.verify(hash, message, publicKey, padded)).toBe(false);
+
+      const ours = crypto.sign(hash, message, privateKey);
+      expect(crypto.verify(hash, message, publicKey, ours)).toBe(true);
+      const oursP1363 = crypto.sign(hash, message, { key: privateKey, dsaEncoding: "ieee-p1363" });
+      expect(oursP1363.length).toBe(p1363Sig.length);
+      expect(crypto.verify(hash, message, { key: publicKey, dsaEncoding: "ieee-p1363" }, oursP1363)).toBe(true);
+      // The sign() of a Sign object hashes on its own path; both agree.
+      expect(crypto.createVerify(hash).update(message).verify(publicKey, ours)).toBe(true);
+      expect(crypto.verify(hash, message, publicKey, crypto.createSign(hash).update(message).sign(privateKey))).toBe(true);
+      // A hash other than the curve's own signs and verifies too.
+      const sha256 = crypto.sign("sha256", message, privateKey);
+      expect(crypto.verify("sha256", message, publicKey, sha256)).toBe(true);
+      expect(crypto.verify(hash, message, publicKey, sha256)).toBe(false);
+    });
+  }
+});
+
 it("should send cipher events in the right order", async () => {
   const package_dir = tmpdirSync();
   const fixture_path = path.join(package_dir, "fixture.js");

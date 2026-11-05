@@ -575,6 +575,74 @@ describe("Ed25519", () => {
   });
 });
 
+// Signatures from OpenSSL (Python's `cryptography`), an implementation independent of Bun's.
+const openssl = {
+  message: new TextEncoder().encode("rind in bun"),
+  ed25519: { jwk: {"kty": "OKP", "crv": "Ed25519", "x": "ipQvnZFEoK-oWH3L1NXl3Dnz17cRrzOV-XM-1N3Ry_I", "d": "9ajlRlaDZOSDM2GUGlL7cQJPybwA7hGdZFiIM-dxVuc"}, signature: "9a8cda00c7a90caf3d8ac3140ba92c48129cac6e3ef646edef9973e82c5220aec5ac070e7b984ae090a2de03ad6fc803440f9596c6754bef0b3a0d98b4cbec0d" },
+  ecdsa: [
+    { curve: "P-384", hash: "SHA-384", jwk: {"kty": "EC", "crv": "P-384", "x": "Ih8bfHO_FwLZxv0hpwZFcK_5vrRNn63emOwqgMSRuCJwlKehp-EcsMF4bzwvcDPU", "y": "l29hu1iSPkoaTa5yjXC2NIf7h3C1Bx82QZQ4uPxodumhqrYdfMTQjyhXcSkwhjNG", "d": "AcvZnjuooXTtZzn3ZZU2LMXLjb1qgdOCX2gXl1WkBwr_7_Gc6rGHQmZYPQTbZbU-"}, signature: "cb40240d092113e2785f363ec261a8f2bc59a001341625b7006a2f239800799239417ab1d1bf86c47d0cdeb87bc4bcab58819ccf512a863aa042bbda2c8be86993a23a815306c8dbf735c598e02488da91265386c854e832d6b8c8a76d8a0d35" },
+    { curve: "P-521", hash: "SHA-512", jwk: {"kty": "EC", "crv": "P-521", "x": "Ae7p4LIan2XCk-qFbp7JUsZBUnx5Cy34iuZffYwIJQ92p4CKCgDKC3KUuvTNPCLVJz3RFqCBWGaNAkYfpXGv77P0", "y": "AYAVZnnQTnBeif72K13AUxE_st574OqmU-ZJkcIHGpFn0nEmMVfaI05W0mGHXdI0zebQNx7gF_kfOMknAu7ix8b0", "d": "AKCLThTsPNIdEb5mwTCu6J-8YxoGk9dgklIaQabnOdZa4exTHlQGmNiRh-mUGh5MlW4daw8ML4DIxigXRaktkFqE"}, signature: "0112108d7b3b8e4967570e0bad202151732f61f84300c18588dd8116cb712f0d84099f60bdc5de785c078cdb42b037f60ca52ae95f67e141af94dc36650c5fc0f47e001766c45fb151c31d8896742820c2a3338a505ff45a314ac2ce23cac365114d783e7989058a8b104e22f4b8b099a4183133786c3f5cfa2a7ecdd19992c9b186944c" },
+  ],
+};
+
+describe("signatures interoperate with OpenSSL", () => {
+  const fromHex = (hex: string) => Uint8Array.from(hex.match(/../g)!, b => parseInt(b, 16));
+
+  it("Ed25519", async () => {
+    const { d, ...publicJwk } = openssl.ed25519.jwk;
+    const privateKey = await crypto.subtle.importKey("jwk", openssl.ed25519.jwk, "Ed25519", true, ["sign"]);
+    const publicKey = await crypto.subtle.importKey("jwk", publicJwk, "Ed25519", true, ["verify"]);
+    const expected = fromHex(openssl.ed25519.signature);
+    // Ed25519 is deterministic, so Bun's signature is OpenSSL's byte for byte.
+    expect(new Uint8Array(await crypto.subtle.sign("Ed25519", privateKey, openssl.message))).toEqual(expected);
+    expect(await crypto.subtle.verify("Ed25519", publicKey, expected, openssl.message)).toBe(true);
+    const tampered = expected.slice();
+    tampered[40] ^= 1;
+    expect(await crypto.subtle.verify("Ed25519", publicKey, tampered, openssl.message)).toBe(false);
+    expect(await crypto.subtle.verify("Ed25519", publicKey, expected, openssl.message.subarray(1))).toBe(false);
+  });
+
+  for (const { curve, hash, jwk, signature } of openssl.ecdsa) {
+    it(`ECDSA ${curve} with ${hash}`, async () => {
+      const { d, ...publicJwk } = jwk;
+      const algorithm = { name: "ECDSA", namedCurve: curve };
+      const privateKey = await crypto.subtle.importKey("jwk", jwk, algorithm, true, ["sign"]);
+      const publicKey = await crypto.subtle.importKey("jwk", publicJwk, algorithm, true, ["verify"]);
+      const params = { name: "ECDSA", hash };
+      const expected = fromHex(signature);
+      expect(await crypto.subtle.verify(params, publicKey, expected, openssl.message)).toBe(true);
+      const tampered = expected.slice();
+      tampered[tampered.length - 1] ^= 1;
+      expect(await crypto.subtle.verify(params, publicKey, tampered, openssl.message)).toBe(false);
+      expect(await crypto.subtle.verify(params, publicKey, expected.subarray(1), openssl.message)).toBe(false);
+
+      const ours = await crypto.subtle.sign(params, privateKey, openssl.message);
+      expect(ours.byteLength).toBe(expected.length);
+      expect(await crypto.subtle.verify(params, publicKey, ours, openssl.message)).toBe(true);
+      // A hash other than the curve's own signs and verifies too.
+      const sha256 = { name: "ECDSA", hash: "SHA-256" };
+      const other = await crypto.subtle.sign(sha256, privateKey, openssl.message);
+      expect(await crypto.subtle.verify(sha256, publicKey, other, openssl.message)).toBe(true);
+      expect(await crypto.subtle.verify(params, publicKey, other, openssl.message)).toBe(false);
+    });
+
+    it(`ECDSA ${curve} generated keys sign, verify, and export`, async () => {
+      const algorithm = { name: "ECDSA", namedCurve: curve };
+      const pair = await crypto.subtle.generateKey(algorithm, true, ["sign", "verify"]);
+      const params = { name: "ECDSA", hash };
+      const sig = await crypto.subtle.sign(params, pair.privateKey, openssl.message);
+      expect(await crypto.subtle.verify(params, pair.publicKey, sig, openssl.message)).toBe(true);
+      const pkcs8 = await crypto.subtle.exportKey("pkcs8", pair.privateKey);
+      const imported = await crypto.subtle.importKey("pkcs8", pkcs8, algorithm, true, ["sign"]);
+      const again = await crypto.subtle.sign(params, imported, openssl.message);
+      expect(await crypto.subtle.verify(params, pair.publicKey, again, openssl.message)).toBe(true);
+      const exported = await crypto.subtle.exportKey("jwk", pair.privateKey);
+      const publicJwk = await crypto.subtle.exportKey("jwk", pair.publicKey);
+      expect([exported.x, exported.y]).toEqual([publicJwk.x, publicJwk.y]);
+    });
+  }
+});
+
 describe("ChaCha20-Poly1305 and AKP review fixes", () => {
   it("raw-public import of an RSA key reports Node's aliased-format message", async () => {
     // Node aliases raw-public/raw-secret to raw for every algorithm (verified

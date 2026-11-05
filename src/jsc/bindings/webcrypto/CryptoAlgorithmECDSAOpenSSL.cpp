@@ -38,6 +38,15 @@ ExceptionOr<Vector<uint8_t>> CryptoAlgorithmECDSA::platformSign(const CryptoAlgo
 {
     size_t keySizeInBytes = (key.keySizeInBits() + 7) / 8;
 
+    if (CryptoKeyEC::rindCurve(key.namedCurve(), parameters.hashIdentifier)) {
+        if (!key.rindKey())
+            return Exception { OperationError };
+        Vector<uint8_t> signature(keySizeInBytes * 2);
+        if (!Bun__Rind__ecdsaSign(key.rindKey(), data.begin(), data.size(), signature.begin(), signature.size()))
+            return Exception { OperationError };
+        return signature;
+    }
+
     const EVP_MD* md = digestAlgorithm(parameters.hashIdentifier);
     if (!md)
         return Exception { NotSupportedError };
@@ -73,6 +82,9 @@ ExceptionOr<bool> CryptoAlgorithmECDSA::platformVerify(const CryptoAlgorithmEcds
     // Bail if the signature size isn't double the key size (i.e. concatenated r and s components).
     if (signature.size() != keySizeInBytes * 2)
         return false;
+
+    if (auto curve = CryptoKeyEC::rindCurve(key.namedCurve(), parameters.hashIdentifier))
+        return Bun::Rind::ecdsaVerify(*curve, EVP_PKEY_get0_EC_KEY(key.platformKey()), data.span(), signature.span());
 
     auto sig = ECDSASigPtr(ECDSA_SIG_new());
     auto r = BN_bin2bn(signature.begin(), keySizeInBytes, nullptr);

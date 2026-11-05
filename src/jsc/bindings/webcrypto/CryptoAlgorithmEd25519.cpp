@@ -38,20 +38,14 @@
 
 namespace WebCore {
 
-static ExceptionOr<Vector<uint8_t>> signEd25519(const Vector<uint8_t>& sk, size_t len, const Vector<uint8_t>& data)
+ExceptionOr<Vector<uint8_t>> CryptoAlgorithmEd25519::platformSign(const CryptoKeyOKP& key, const Vector<uint8_t>& data)
 {
-    if (sk.size() != len || len != ED25519_PRIVATE_KEY_LEN)
+    if (!key.rindKey())
         return Exception { OperationError };
 
     uint8_t newSignature[64];
-
-    ED25519_sign(newSignature, data.begin(), data.size(), sk.begin());
+    Bun__Rind__ed25519Sign(key.rindKey(), data.begin(), data.size(), newSignature);
     return Vector<uint8_t>(std::span { newSignature, 64 });
-}
-
-ExceptionOr<Vector<uint8_t>> CryptoAlgorithmEd25519::platformSign(const CryptoKeyOKP& key, const Vector<uint8_t>& data)
-{
-    return signEd25519(key.platformKey(), key.keySizeInBytes(), data);
 }
 
 static ExceptionOr<bool> verifyEd25519(const Vector<uint8_t>& key, size_t keyLengthInBytes, const Vector<uint8_t>& signature, const Vector<uint8_t> data)
@@ -62,7 +56,7 @@ static ExceptionOr<bool> verifyEd25519(const Vector<uint8_t>& key, size_t keyLen
     if (signature.size() != keyLengthInBytes * 2)
         return false;
 
-    if (ED25519_verify(data.begin(), data.size(), signature.begin(), key.begin()) != 1)
+    if (!Bun__Rind__ed25519Verify(key.begin(), data.begin(), data.size(), signature.begin()))
         return false;
 
     // WPT WebCryptoAPI/sign_verify/eddsa_small_order_points.js

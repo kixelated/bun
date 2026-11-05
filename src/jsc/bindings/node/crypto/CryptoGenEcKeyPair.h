@@ -19,6 +19,7 @@ public:
 
     void deinit();
     ncrypto::EVPKeyCtxPointer setup();
+    bool generateOnRind();
     static std::optional<EcKeyPairJobCtx> fromJS(JSC::JSGlobalObject* globalObject, JSC::ThrowScope& scope, const JSC::GCOwnedDataScope<WTF::StringView>& typeView, JSC::JSValue optionsValue, const KeyEncodingConfig& config);
 
     int m_curveNid;

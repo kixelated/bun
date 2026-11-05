@@ -79,14 +79,18 @@ RefPtr<CryptoKeyOKP> CryptoKeyOKP::create(CryptoAlgorithmIdentifier identifier, 
         if (platformKey.size() != bytesExpectedExternal && platformKey.size() != bytesExpectedInternal)
             return nullptr;
 
-        auto privateKey = ed25519PrivateFromSeed(KeyMaterial(platformKey.span().first(bytesExpectedExternal)));
-        if (privateKey.size() != bytesExpectedInternal)
+        auto seed = platformKey.span().first(bytesExpectedExternal);
+        std::array<uint8_t, 32> publicKey;
+        Bun::Rind::Ed25519Key rindKey(Bun__Rind__ed25519FromSeed(seed.data(), publicKey.data()));
+        if (!rindKey)
             return nullptr;
 
-        if (platformKey.size() == bytesExpectedInternal && constantTimeMemcmp(privateKey.span().subspan(bytesExpectedExternal), platformKey.span().subspan(bytesExpectedExternal)))
+        if (platformKey.size() == bytesExpectedInternal && constantTimeMemcmp(std::span<const uint8_t> { publicKey }, platformKey.span().subspan(bytesExpectedExternal)))
             return nullptr;
 
-        return adoptRef(*new CryptoKeyOKP(identifier, curve, type, WTF::move(privateKey), extractable, usages));
+        KeyMaterial privateKey(seed);
+        privateKey.append(std::span<const uint8_t> { publicKey });
+        return adoptRef(*new CryptoKeyOKP(identifier, curve, type, WTF::move(privateKey), extractable, usages, WTF::move(rindKey)));
     }
 
     if (platformKey.size() != bytesExpectedInternal)
@@ -95,12 +99,14 @@ RefPtr<CryptoKeyOKP> CryptoKeyOKP::create(CryptoAlgorithmIdentifier identifier, 
     return adoptRef(*new CryptoKeyOKP(identifier, curve, type, WTF::move(platformKey), extractable, usages));
 }
 
-CryptoKeyOKP::CryptoKeyOKP(CryptoAlgorithmIdentifier identifier, NamedCurve curve, CryptoKeyType type, KeyMaterial&& data, bool extractable, CryptoKeyUsageBitmap usages)
+CryptoKeyOKP::CryptoKeyOKP(CryptoAlgorithmIdentifier identifier, NamedCurve curve, CryptoKeyType type, KeyMaterial&& data, bool extractable, CryptoKeyUsageBitmap usages, Bun::Rind::Ed25519Key&& rindKey)
     : CryptoKey(identifier, type, extractable, usages)
     , m_curve(curve)
     , m_data(data)
     , m_exportKey(curve == NamedCurve::Ed25519 && type == CryptoKeyType::Private ? std::optional<Vector<uint8_t>>(Vector<uint8_t>(std::span { data.begin(), 32 })) : std::nullopt)
+    , m_rindKey(WTF::move(rindKey))
 {
+    ASSERT(!!m_rindKey == (curve == NamedCurve::Ed25519 && type == CryptoKeyType::Private));
 }
 
 ExceptionOr<CryptoKeyPair> CryptoKeyOKP::generatePair(CryptoAlgorithmIdentifier identifier, NamedCurve namedCurve, bool extractable, CryptoKeyUsageBitmap usages)

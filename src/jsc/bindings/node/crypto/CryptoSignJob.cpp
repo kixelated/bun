@@ -3,6 +3,8 @@
 #include "KeyObject.h"
 #include "JSVerify.h"
 #include <openssl/rsa.h>
+#include <openssl/ecdsa.h>
+#include "rind.h"
 
 using namespace JSC;
 using namespace ncrypto;
@@ -100,6 +102,9 @@ void SignJobCtx::runTask(JSGlobalObject* globalObject)
     }
 
     ClearErrorOnReturn clearError;
+    if (runOnRind())
+        return;
+
     auto context = EVPMDCtxPointer::New();
     if (!context) [[unlikely]] {
         m_opensslError = ERR_get_error();
@@ -215,6 +220,109 @@ void SignJobCtx::runTask(JSGlobalObject* globalObject)
         break;
     }
     }
+}
+
+// Runs Ed25519, and ECDSA on P-384 and P-521 with its curve's hash, on rind.
+// Returns false to leave every other key and digest to BoringSSL.
+bool SignJobCtx::runOnRind()
+{
+    const auto& key = m_keyData->asymmetricKey;
+    const uint8_t* data = m_data.begin();
+    size_t dataLen = m_data.size();
+
+    if (key.id() == EVP_PKEY_ED25519) {
+        switch (m_mode) {
+        case Mode::Sign: {
+            auto* rindKey = m_keyData->rindEd25519Key();
+            if (!rindKey)
+                return true;
+            auto signature = DataPointer::Alloc(64);
+            if (!signature) {
+                m_opensslError = ERR_get_error();
+                return true;
+            }
+            Bun__Rind__ed25519Sign(rindKey, data, dataLen, static_cast<uint8_t*>(signature.get()));
+            m_signResult = ByteSource::allocated(signature.release());
+            return true;
+        }
+        case Mode::Verify: {
+            uint8_t publicKey[32];
+            size_t publicKeyLen = sizeof(publicKey);
+            if (!EVP_PKEY_get_raw_public_key(key.get(), publicKey, &publicKeyLen) || publicKeyLen != sizeof(publicKey)) {
+                m_opensslError = ERR_get_error();
+                return true;
+            }
+            m_verifyResult = m_signature.size() == 64
+                && Bun__Rind__ed25519Verify(publicKey, data, dataLen, m_signature.begin())
+                && !key.hasSmallOrderEdDsaPoint({ m_signature.begin(), m_signature.size() });
+            return true;
+        }
+        }
+    }
+
+    if (key.id() != EVP_PKEY_EC || !m_digest)
+        return false;
+    const EC_KEY* ecKey = EVP_PKEY_get0_EC_KEY(key.get());
+    auto curve = Bun::Rind::curveForSigning(ecKey, EVP_MD_type(m_digest.get()));
+    if (!curve)
+        return false;
+    size_t n = Bun::Rind::scalarSize(*curve);
+    uint8_t fixed[2 * 66];
+
+    switch (m_mode) {
+    case Mode::Sign: {
+        auto* rindKey = m_keyData->rindEcdsaKey();
+        if (!rindKey || !Bun__Rind__ecdsaSign(rindKey, data, dataLen, fixed, 2 * n))
+            return true;
+        if (m_dsaSigEnc == DSASigEnc::P1363) {
+            auto signature = DataPointer::Alloc(2 * n);
+            if (!signature) {
+                m_opensslError = ERR_get_error();
+                return true;
+            }
+            memcpy(signature.get(), fixed, 2 * n);
+            m_signResult = ByteSource::allocated(signature.release());
+            return true;
+        }
+        std::unique_ptr<ECDSA_SIG, decltype(&ECDSA_SIG_free)> sig(ECDSA_SIG_new(), ECDSA_SIG_free);
+        BIGNUM* r = BN_bin2bn(fixed, n, nullptr);
+        BIGNUM* s = BN_bin2bn(fixed + n, n, nullptr);
+        uint8_t* der = nullptr;
+        size_t derLen = 0;
+        if (!sig || !r || !s || !ECDSA_SIG_set0(sig.get(), r, s)) {
+            BN_free(r);
+            BN_free(s);
+            m_opensslError = ERR_get_error();
+            return true;
+        }
+        if (!ECDSA_SIG_to_bytes(&der, &derLen, sig.get())) {
+            m_opensslError = ERR_get_error();
+            return true;
+        }
+        m_signResult = ByteSource::allocated(der, derLen);
+        return true;
+    }
+    case Mode::Verify: {
+        // The signature is DER here: P1363 input was converted when the job was made.
+        // Refuse DER that does not re-encode to itself, as BoringSSL's ECDSA_verify does.
+        std::unique_ptr<ECDSA_SIG, decltype(&ECDSA_SIG_free)> sig(ECDSA_SIG_from_bytes(m_signature.begin(), m_signature.size()), ECDSA_SIG_free);
+        uint8_t* der = nullptr;
+        size_t derLen = 0;
+        const BIGNUM* r = nullptr;
+        const BIGNUM* s = nullptr;
+        if (sig)
+            ECDSA_SIG_get0(sig.get(), &r, &s);
+        bool canonical = sig && ECDSA_SIG_to_bytes(&der, &derLen, sig.get())
+            && derLen == m_signature.size() && !memcmp(der, m_signature.begin(), derLen);
+        OPENSSL_free(der);
+        ERR_clear_error();
+        m_verifyResult = canonical
+            && BN_bn2bin_padded(fixed, n, r) && BN_bn2bin_padded(fixed + n, n, s)
+            && Bun::Rind::ecdsaVerify(*curve, ecKey, { data, dataLen }, { fixed, 2 * n });
+        return true;
+    }
+    }
+    return false;
 }
 
 extern "C" void Bun__SignJobCtx__runFromJS(SignJobCtx* ctx, JSGlobalObject* globalObject, JSCallbackArgs* out)

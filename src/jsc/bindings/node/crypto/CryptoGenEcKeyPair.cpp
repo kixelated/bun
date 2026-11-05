@@ -1,4 +1,5 @@
 #include "CryptoGenEcKeyPair.h"
+#include "rind.h"
 #include "CryptoUtil.h"
 #include "NodeValidator.h"
 #include "ncrypto.h"
@@ -18,6 +19,8 @@ void EcKeyPairJobCtx::deinit()
 
 extern "C" void Bun__EcKeyPairJobCtx__runTask(EcKeyPairJobCtx* ctx, JSGlobalObject* globalObject)
 {
+    if (ctx->generateOnRind())
+        return;
     ncrypto::EVPKeyCtxPointer keyCtx = ctx->setup();
     if (!keyCtx) {
         return;
@@ -35,6 +38,22 @@ void EcKeyPairJob::createAndSchedule(JSGlobalObject* globalObject, EcKeyPairJobC
 {
     EcKeyPairJobCtx* ctxCopy = new EcKeyPairJobCtx(WTF::move(ctx));
     Bun__EcKeyPairJob__createAndSchedule(globalObject, ctxCopy, JSValue::encode(callback));
+}
+
+// Generates a P-384 or P-521 key with a named curve on rind. Returns false to
+// leave every other curve and parameter encoding to BoringSSL.
+bool EcKeyPairJobCtx::generateOnRind()
+{
+    if (m_paramEncoding != OPENSSL_EC_NAMED_CURVE || !Bun::Rind::curveForNid(m_curveNid))
+        return false;
+    auto ecKey = ncrypto::ECKeyPointer::NewByCurveName(m_curveNid);
+    auto key = ncrypto::EVPKeyPointer::New();
+    if (!ecKey || !key || !Bun::Rind::generateEcdsaKey(ecKey.get()) || !key.set(ecKey)) {
+        m_opensslError = ERR_get_error();
+        return true;
+    }
+    m_keyObj = KeyObject::create(CryptoKeyType::Private, WTF::move(key));
+    return true;
 }
 
 ncrypto::EVPKeyCtxPointer EcKeyPairJobCtx::setup()

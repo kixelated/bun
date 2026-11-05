@@ -108,7 +108,15 @@ std::optional<CryptoKeyPair> CryptoKeyEC::platformGeneratePair(CryptoAlgorithmId
     if (!privateECKey)
         return std::nullopt;
 
-    if (EC_KEY_generate_key(privateECKey.get()) <= 0)
+    Bun::Rind::EcdsaKey rindKey;
+    if (curve == NamedCurve::P384 || curve == NamedCurve::P521) {
+        rindKey = Bun::Rind::generateEcdsaKey(privateECKey.get());
+        if (!rindKey)
+            return std::nullopt;
+        // ECDH keys run on BoringSSL, so keep rind's copy only for ECDSA.
+        if (identifier != CryptoAlgorithmIdentifier::ECDSA)
+            rindKey = nullptr;
+    } else if (EC_KEY_generate_key(privateECKey.get()) <= 0)
         return std::nullopt;
 
     auto point = ECPointPtr(EC_POINT_dup(EC_KEY_get0_public_key(privateECKey.get()), EC_KEY_get0_group(privateECKey.get())));
@@ -131,7 +139,7 @@ std::optional<CryptoKeyPair> CryptoKeyEC::platformGeneratePair(CryptoAlgorithmId
         return std::nullopt;
 
     auto publicKey = CryptoKeyEC::create(identifier, curve, CryptoKeyType::Public, WTF::move(publicPKey), true, usages);
-    auto privateKey = CryptoKeyEC::create(identifier, curve, CryptoKeyType::Private, WTF::move(privatePKey), extractable, usages);
+    auto privateKey = CryptoKeyEC::create(identifier, curve, CryptoKeyType::Private, WTF::move(privatePKey), extractable, usages, WTF::move(rindKey));
     return CryptoKeyPair { WTF::move(publicKey), WTF::move(privateKey) };
 }
 

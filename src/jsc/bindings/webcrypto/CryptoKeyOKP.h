@@ -28,6 +28,7 @@
 #include "CryptoKey.h"
 #include "CryptoKeyPair.h"
 #include "ExceptionOr.h"
+#include "rind.h"
 
 #if ENABLE(WEB_CRYPTO)
 
@@ -63,17 +64,18 @@ public:
 
     static KeyMaterial ed25519PublicFromPrivate(const KeyMaterial& privateKey);
     static KeyMaterial x25519PublicFromPrivate(const KeyMaterial& privateKey);
-    static KeyMaterial ed25519PrivateFromSeed(KeyMaterial&& seed);
 
     size_t keySizeInBits() const { return platformKey().size() * 8; }
     size_t keySizeInBytes() const { return platformKey().size(); }
     const KeyMaterial& platformKey() const { return m_data; }
+    // An Ed25519 private key's rind key pair; null for every other key.
+    const BunRindEd25519Key* rindKey() const { return m_rindKey.get(); }
 
     size_t exportKeySizeInBytes() const { return exportKey().size(); }
     const KeyMaterial& exportKey() const { return !m_exportKey ? m_data : *m_exportKey; };
 
 private:
-    CryptoKeyOKP(CryptoAlgorithmIdentifier, NamedCurve, CryptoKeyType, Vector<uint8_t>&&, bool extractable, CryptoKeyUsageBitmap);
+    CryptoKeyOKP(CryptoAlgorithmIdentifier, NamedCurve, CryptoKeyType, Vector<uint8_t>&&, bool extractable, CryptoKeyUsageBitmap, Bun::Rind::Ed25519Key&& = nullptr);
 
     CryptoKeyClass keyClass() const final { return CryptoKeyClass::OKP; }
     KeyAlgorithm algorithm() const final;
@@ -88,6 +90,7 @@ private:
     NamedCurve m_curve;
     KeyMaterial m_data;
     std::optional<KeyMaterial> m_exportKey;
+    Bun::Rind::Ed25519Key m_rindKey;
 };
 
 } // namespace WebCore

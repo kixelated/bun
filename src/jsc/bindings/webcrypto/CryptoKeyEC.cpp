@@ -50,13 +50,33 @@ static std::optional<CryptoKeyEC::NamedCurve> toNamedCurve(const String& curve)
     return std::nullopt;
 }
 
-CryptoKeyEC::CryptoKeyEC(CryptoAlgorithmIdentifier identifier, NamedCurve curve, CryptoKeyType type, PlatformECKeyContainer&& platformKey, bool extractable, CryptoKeyUsageBitmap usages)
+CryptoKeyEC::CryptoKeyEC(CryptoAlgorithmIdentifier identifier, NamedCurve curve, CryptoKeyType type, PlatformECKeyContainer&& platformKey, bool extractable, CryptoKeyUsageBitmap usages, Bun::Rind::EcdsaKey&& rindKey)
     : CryptoKey(identifier, type, extractable, usages)
     , m_platformKey(WTF::move(platformKey))
     , m_curve(curve)
+    , m_rindKey(WTF::move(rindKey))
 {
     // Only CryptoKeyEC objects for supported curves should be created.
     ASSERT(platformSupportedCurve(curve));
+}
+
+const BunRindEcdsaKey* CryptoKeyEC::rindKey() const
+{
+    // Built here rather than at import, which rind does not speed up, so a key never signed costs nothing.
+    std::call_once(m_rindOnce, [this] {
+        if (!m_rindKey && algorithmIdentifier() == CryptoAlgorithmIdentifier::ECDSA && type() == CryptoKeyType::Private)
+            m_rindKey = Bun::Rind::ecdsaKey(EVP_PKEY_get0_EC_KEY(m_platformKey.get()));
+    });
+    return m_rindKey.get();
+}
+
+std::optional<BunRindCurve> CryptoKeyEC::rindCurve(NamedCurve curve, CryptoAlgorithmIdentifier hash)
+{
+    if (curve == NamedCurve::P384 && hash == CryptoAlgorithmIdentifier::SHA_384)
+        return BunRindCurve::P384;
+    if (curve == NamedCurve::P521 && hash == CryptoAlgorithmIdentifier::SHA_512)
+        return BunRindCurve::P521;
+    return std::nullopt;
 }
 
 ExceptionOr<CryptoKeyPair> CryptoKeyEC::generatePair(CryptoAlgorithmIdentifier identifier, const String& curve, bool extractable, CryptoKeyUsageBitmap usages)

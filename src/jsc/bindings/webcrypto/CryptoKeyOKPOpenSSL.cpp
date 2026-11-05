@@ -32,6 +32,7 @@
 // #include "Logging.h"
 #include <wtf/text/Base64.h>
 #include <openssl/curve25519.h>
+#include <openssl/mem.h>
 #include "CommonCryptoDERUtilities.h"
 #include "OpenSSLCryptoUniquePtr.h"
 #include <openssl/evp.h>
@@ -54,19 +55,29 @@ std::optional<CryptoKeyPair> CryptoKeyOKP::platformGeneratePair(CryptoAlgorithmI
     if (namedCurve != NamedCurve::Ed25519 && namedCurve != NamedCurve::X25519)
         return {};
 
-    Vector<uint8_t> public_key(ED25519_PUBLIC_KEY_LEN), private_key(ED25519_PRIVATE_KEY_LEN);
+    bool isPublicKeyExtractable = true;
+    Vector<uint8_t> public_key(ED25519_PUBLIC_KEY_LEN);
 
-    bool isEd25519 = identifier == CryptoAlgorithmIdentifier::Ed25519;
-    if (isEd25519) {
-        ED25519_keypair(public_key.begin(), private_key.begin());
-    } else {
-        X25519_keypair(public_key.begin(), private_key.begin());
+    if (identifier == CryptoAlgorithmIdentifier::Ed25519) {
+        std::array<uint8_t, 32> seed;
+        Bun::Rind::Ed25519Key rindKey(Bun__Rind__ed25519Generate(seed.data(), public_key.begin()));
+        if (!rindKey)
+            return {};
+        Vector<uint8_t> private_key(std::span<const uint8_t> { seed });
+        private_key.append(public_key.span());
+        OPENSSL_cleanse(seed.data(), seed.size());
+        auto publicKey = CryptoKeyOKP::create(identifier, namedCurve, CryptoKeyType::Public, WTF::move(public_key), isPublicKeyExtractable, usages);
+        ASSERT(publicKey);
+        RefPtr<CryptoKeyOKP> privateKey = adoptRef(*new CryptoKeyOKP(identifier, namedCurve, CryptoKeyType::Private, WTF::move(private_key), extractable, usages, WTF::move(rindKey)));
+        return CryptoKeyPair { WTF::move(publicKey), WTF::move(privateKey) };
     }
 
-    bool isPublicKeyExtractable = true;
+    Vector<uint8_t> private_key(X25519_PRIVATE_KEY_LEN);
+    X25519_keypair(public_key.begin(), private_key.begin());
+
     auto publicKey = CryptoKeyOKP::create(identifier, namedCurve, CryptoKeyType::Public, WTF::move(public_key), isPublicKeyExtractable, usages);
     ASSERT(publicKey);
-    RefPtr<CryptoKeyOKP> privateKey = adoptRef(*new CryptoKeyOKP(identifier, namedCurve, CryptoKeyType::Private, Vector<uint8_t>(std::span { private_key.begin(), isEd25519 ? (unsigned int)ED25519_PRIVATE_KEY_LEN : (unsigned int)X25519_PRIVATE_KEY_LEN }), extractable, usages));
+    RefPtr<CryptoKeyOKP> privateKey = adoptRef(*new CryptoKeyOKP(identifier, namedCurve, CryptoKeyType::Private, WTF::move(private_key), extractable, usages));
     return CryptoKeyPair { WTF::move(publicKey), WTF::move(privateKey) };
 }
 
@@ -246,16 +257,6 @@ CryptoKeyOKP::KeyMaterial CryptoKeyOKP::x25519PublicFromPrivate(const KeyMateria
     X25519_public_from_private(publicKey.begin(), privateKey.begin());
 
     return publicKey;
-}
-
-CryptoKeyOKP::KeyMaterial CryptoKeyOKP::ed25519PrivateFromSeed(KeyMaterial&& seed)
-{
-    uint8_t publicKey[ED25519_PUBLIC_KEY_LEN];
-    auto privateKey = KeyMaterial(ED25519_PRIVATE_KEY_LEN);
-
-    ED25519_keypair_from_seed(publicKey, privateKey.begin(), seed.begin());
-
-    return privateKey;
 }
 
 String CryptoKeyOKP::generateJwkX() const

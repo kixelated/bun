@@ -222,7 +222,7 @@ void SignJobCtx::runTask(JSGlobalObject* globalObject)
     }
 }
 
-// Runs Ed25519, and ECDSA on P-384 and P-521 with its curve's hash, on rind.
+// Runs Ed25519 without a digest, and ECDSA on P-384 and P-521 with its curve's hash, on rind.
 // Returns false to leave every other key and digest to BoringSSL.
 bool SignJobCtx::runOnRind()
 {
@@ -230,7 +230,8 @@ bool SignJobCtx::runOnRind()
     const uint8_t* data = m_data.begin();
     size_t dataLen = m_data.size();
 
-    if (key.id() == EVP_PKEY_ED25519) {
+    // Ed25519 hashes on its own; BoringSSL refuses a digest for it, so leave that to report the error.
+    if (key.id() == EVP_PKEY_ED25519 && !m_digest) {
         switch (m_mode) {
         case Mode::Sign: {
             auto* rindKey = m_keyData->rindEd25519Key();

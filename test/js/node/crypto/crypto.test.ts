@@ -451,6 +451,9 @@ describe("crypto.sign()/crypto.verify() interoperate with OpenSSL", () => {
     tampered[3] ^= 1;
     expect(crypto.verify(null, message, publicKey, tampered)).toBe(false);
     expect(crypto.verify(null, message, publicKey, expected.subarray(1))).toBe(false);
+    // Ed25519 takes no digest.
+    expect(() => crypto.sign("sha256", message, privateKey)).toThrow();
+    expect(() => crypto.verify("sha256", message, publicKey, expected)).toThrow();
   });
 
   for (const { curve, hash, jwk, der, p1363 } of ecdsa) {

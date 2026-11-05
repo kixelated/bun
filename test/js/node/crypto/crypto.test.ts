@@ -451,9 +451,21 @@ describe("crypto.sign()/crypto.verify() interoperate with OpenSSL", () => {
     tampered[3] ^= 1;
     expect(crypto.verify(null, message, publicKey, tampered)).toBe(false);
     expect(crypto.verify(null, message, publicKey, expected.subarray(1))).toBe(false);
-    // Ed25519 takes no digest.
-    expect(() => crypto.sign("sha256", message, privateKey)).toThrow();
-    expect(() => crypto.verify("sha256", message, publicKey, expected)).toThrow();
+  });
+
+  it("Ed25519 refuses a digest", async () => {
+    const privateKey = crypto.createPrivateKey({ key: ed25519.jwk, format: "jwk" });
+    const publicKey = crypto.createPublicKey(privateKey);
+    const signature = Buffer.from(ed25519.signature, "hex");
+    const refused = expect.objectContaining({ code: "ERR_OSSL_EVP_COMMAND_NOT_SUPPORTED" });
+    expect(() => crypto.sign("sha256", message, privateKey)).toThrow(refused);
+    expect(() => crypto.verify("sha256", message, publicKey, signature)).toThrow(refused);
+    const { promise: signed, resolve: signDone } = Promise.withResolvers<unknown>();
+    crypto.sign("sha256", message, privateKey, err => signDone(err));
+    expect(await signed).toEqual(refused);
+    const { promise: verified, resolve: verifyDone } = Promise.withResolvers<unknown>();
+    crypto.verify("sha256", message, publicKey, signature, err => verifyDone(err));
+    expect(await verified).toEqual(refused);
   });
 
   for (const { curve, hash, jwk, der, p1363 } of ecdsa) {

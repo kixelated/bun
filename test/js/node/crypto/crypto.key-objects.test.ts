@@ -2007,6 +2007,34 @@ function randomProp() {
   return "prop" + crypto.randomUUID().replace(/-/g, "");
 }
 
+// OpenSSL's `ec -no_public`: a key in an encoding rind doesn't write, which BoringSSL parses instead.
+test.each([
+  ["P-256", "prime256v1", "sha256", "MEECAQAwEwYHKoZIzj0CAQYIKoZIzj0DAQcEJzAlAgEBBCCCRZ7g2iNsYoFGcoIjTI3rntVQqdT2/Xg72Swk8ESmHQ=="],
+  [
+    "P-384",
+    "secp384r1",
+    "sha384",
+    "ME4CAQAwEAYHKoZIzj0CAQYFK4EEACIENzA1AgEBBDCEz5Ses+JXofIlvnmIT5PbziznGuXpbyDZD61EC/jo6PKL41Aj0qrm2P1E5HvxuUk=",
+  ],
+])("a %s PKCS#8 key without its public key signs and exports", (_, namedCurve, hash, base64) => {
+  const der = Buffer.from(base64, "base64");
+  const privateKey = createPrivateKey({ key: der, format: "der", type: "pkcs8" });
+  expect(privateKey.asymmetricKeyDetails).toEqual({ namedCurve });
+  const publicKey = createPublicKey(privateKey);
+  const message = Buffer.from("rind");
+  expect(verify(hash, message, publicKey, sign(hash, message, privateKey))).toBe(true);
+  expect(createVerify(hash).update(message).verify(publicKey, createSign(hash).update(message).sign(privateKey))).toBe(
+    true,
+  );
+
+  // It exports as it came, still without the public key; from its JWK, it gains one.
+  expect(privateKey.export({ format: "der", type: "pkcs8" })).toEqual(der);
+  const jwk = privateKey.export({ format: "jwk" });
+  const withPublic = createPrivateKey({ key: jwk, format: "jwk" }).export({ format: "der", type: "pkcs8" });
+  expect(withPublic.length).toBeGreaterThan(der.length);
+  expect(createPrivateKey({ key: withPublic, format: "der", type: "pkcs8" }).export({ format: "jwk" })).toEqual(jwk);
+});
+
 test("generateKeyPair passes the thrown Error to the callback when key export fails", async () => {
   const { promise, resolve } = Promise.withResolvers<Error & { code?: string }>();
   // P-224 keygen succeeds, JWK export does not, driving the caught-exception

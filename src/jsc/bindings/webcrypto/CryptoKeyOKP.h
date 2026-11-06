@@ -62,20 +62,21 @@ public:
 
     NamedCurve namedCurve() const { return m_curve; }
 
-    static KeyMaterial ed25519PublicFromPrivate(const KeyMaterial& privateKey);
     static KeyMaterial x25519PublicFromPrivate(const KeyMaterial& privateKey);
 
     size_t keySizeInBits() const { return platformKey().size() * 8; }
     size_t keySizeInBytes() const { return platformKey().size(); }
     const KeyMaterial& platformKey() const { return m_data; }
-    // An Ed25519 private key's rind key pair; null for every other key.
-    const BunRindEd25519Key* rindKey() const { return m_rindKey.get(); }
+    // An Ed25519 key's rind key; null for X25519, which rind runs from the raw key.
+    const BunRindKey* rindKey() const { return m_rindKey.get(); }
+    // An Ed25519 key rind parsed or generated.
+    static Ref<CryptoKeyOKP> createEd25519(CryptoKeyType, Bun::Rind::Key&&, bool extractable, CryptoKeyUsageBitmap);
 
     size_t exportKeySizeInBytes() const { return exportKey().size(); }
     const KeyMaterial& exportKey() const { return !m_exportKey ? m_data : *m_exportKey; };
 
 private:
-    CryptoKeyOKP(CryptoAlgorithmIdentifier, NamedCurve, CryptoKeyType, Vector<uint8_t>&&, bool extractable, CryptoKeyUsageBitmap, Bun::Rind::Ed25519Key&& = nullptr);
+    CryptoKeyOKP(CryptoAlgorithmIdentifier, NamedCurve, CryptoKeyType, Vector<uint8_t>&&, bool extractable, CryptoKeyUsageBitmap, Bun::Rind::Key&& = nullptr);
 
     CryptoKeyClass keyClass() const final { return CryptoKeyClass::OKP; }
     KeyAlgorithm algorithm() const final;
@@ -90,7 +91,7 @@ private:
     NamedCurve m_curve;
     KeyMaterial m_data;
     std::optional<KeyMaterial> m_exportKey;
-    Bun::Rind::Ed25519Key m_rindKey;
+    Bun::Rind::Key m_rindKey;
 };
 
 } // namespace WebCore

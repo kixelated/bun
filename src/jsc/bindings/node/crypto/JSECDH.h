@@ -6,6 +6,7 @@
 #include <JavaScriptCore/JSTypedArrays.h>
 #include <wtf/text/WTFString.h>
 #include "ncrypto.h"
+#include "rind.h"
 #include "BunClientData.h"
 
 namespace Bun {
@@ -40,6 +41,8 @@ public:
 
     ncrypto::ECKeyPointer m_key;
     const EC_GROUP* m_group;
+    // rind's copy of m_key while it holds a key pair rind generated; null once either half is set.
+    Bun::Rind::Key m_rindKey;
     size_t m_sizeForGC { 0 };
 
     JSC::EncodedJSValue getPublicKey(JSC::JSGlobalObject*, JSC::ThrowScope&, JSC::JSValue encodingValue, JSC::JSValue formatValue);

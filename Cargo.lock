@@ -3500,8 +3500,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 [[package]]
 name = "rind"
 version = "0.1.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e8d0f835f9994234beb4e6c49833b90aadf3c590a42519bbca281af0e81fd52"
+source = "git+https://github.com/moq-dev/rind?rev=ba5ea58ea6836397238a61a2784ba2619d7aae0d#ba5ea58ea6836397238a61a2784ba2619d7aae0d"
 dependencies = [
  "cfg-if",
  "curve25519-dalek",

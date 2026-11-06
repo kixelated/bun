@@ -207,6 +207,8 @@ JSC_DEFINE_HOST_FUNCTION(jsVerifyProtoFuncInit, (JSGlobalObject * globalObject, 
 
     // Store the initialized context in the JSVerify object
     thisObject->m_mdCtx = WTF::move(mdCtx);
+    auto rindHash = Bun::Rind::hashForDigest(digest);
+    thisObject->m_rindDigest.reset(rindHash ? Bun__Rind__digestNew(*rindHash) : nullptr);
 
     if (!thisObject->m_sizeForGC) {
         thisObject->m_sizeForGC = sizeof(EVP_MD_CTX);
@@ -274,6 +276,11 @@ JSC_DEFINE_HOST_FUNCTION(jsVerifyProtoFuncUpdate, (JSGlobalObject * globalObject
             return ERR::CRYPTO_INVALID_STATE(scope, globalObject, "Not initialised"_s);
         }
 
+        if (thisObject->m_rindDigest) {
+            Bun__Rind__digestUpdate(thisObject->m_rindDigest.get(), static_cast<const uint8_t*>(buffer.data), buffer.len);
+            return JSValue::encode(wrappedVerify);
+        }
+
         ncrypto::ClearErrorOnReturn clearErrorOnReturn;
         if (!thisObject->m_mdCtx.digestUpdate(buffer)) {
             throwCryptoError(globalObject, scope, ERR_get_error(), "Failed to update digest");
@@ -301,6 +308,11 @@ JSC_DEFINE_HOST_FUNCTION(jsVerifyProtoFuncUpdate, (JSGlobalObject * globalObject
 
     if (!thisObject->m_mdCtx) {
         return ERR::CRYPTO_INVALID_STATE(scope, globalObject, "Not initialised"_s);
+    }
+
+    if (thisObject->m_rindDigest) {
+        Bun__Rind__digestUpdate(thisObject->m_rindDigest.get(), static_cast<const uint8_t*>(buffer.data), buffer.len);
+        return JSValue::encode(wrappedVerify);
     }
 
     ncrypto::ClearErrorOnReturn clearErrorOnReturn;
@@ -366,6 +378,27 @@ JSC_DEFINE_HOST_FUNCTION(jsVerifyProtoFuncVerify, (JSGlobalObject * globalObject
     DSASigEnc dsaSigEnc = getDSASigEnc(globalObject, scope, options);
     RETURN_IF_EXCEPTION(scope, {});
 
+    // ECDSA over a SHA-2 digest verifies on rind.
+    auto rindKind = keyObject.data()->rindKind();
+    if (thisObject->m_rindDigest && rindKind && Bun::Rind::isEc(*rindKind)) {
+        thisObject->m_mdCtx.reset();
+        Bun::Rind::Digest digest(Bun__Rind__digestFinish(thisObject->m_rindDigest.release()));
+        thisObject->m_sizeForGC = 0;
+
+        std::span<const uint8_t> signature { static_cast<const uint8_t*>(signatureBuffer->vector()), signatureBuffer->byteLength() };
+        size_t n = Bun::Rind::scalarSize(*rindKind);
+        uint8_t fixed[Bun::Rind::maxSignatureSize];
+        if (dsaSigEnc == DSASigEnc::P1363) {
+            if (signature.size() != 2 * n)
+                return ERR::CRYPTO_OPERATION_FAILED(scope, globalObject, "Malformed signature"_s);
+            memcpy(fixed, signature.data(), signature.size());
+        } else if (!Bun::Rind::derToFixed(signature, n, fixed)) {
+            return JSValue::encode(jsBoolean(false));
+        }
+        const BunRindKey* key = keyObject.data()->rindKey();
+        return JSValue::encode(jsBoolean(key && Bun__Rind__verifyDigest(key, digest.get(), fixed, 2 * n)));
+    }
+
     // https://github.com/nodejs/node/blob/v26.12.1/src/crypto/crypto_sig.cc#L530-L607
     if (keyPtr.isOneShotVariant()) {
         return ERR::CRYPTO_UNSUPPORTED_OPERATION(scope, globalObject);
@@ -399,7 +432,11 @@ JSC_DEFINE_HOST_FUNCTION(jsVerifyProtoFuncVerify, (JSGlobalObject * globalObject
     }
 
     // Get the final digest
-    auto data = mdCtx.digestFinal(mdCtx.getExpectedSize());
+    Bun::Rind::Digest rindDigest(thisObject->m_rindDigest ? Bun__Rind__digestFinish(thisObject->m_rindDigest.release()) : nullptr);
+    uint8_t rindDigestBytes[64];
+    auto data = rindDigest
+        ? ncrypto::DataPointer::FromSpan({ rindDigestBytes, Bun__Rind__digestBytes(rindDigest.get(), rindDigestBytes) })
+        : mdCtx.digestFinal(mdCtx.getExpectedSize());
     if (!data) {
         throwTypeError(globalObject, scope, "Failed to finalize digest"_s);
         return {};

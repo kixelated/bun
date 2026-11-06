@@ -55,41 +55,22 @@ std::optional<CryptoKeyPair> CryptoKeyOKP::platformGeneratePair(CryptoAlgorithmI
     if (namedCurve != NamedCurve::Ed25519 && namedCurve != NamedCurve::X25519)
         return {};
 
-    bool isPublicKeyExtractable = true;
-    Vector<uint8_t> public_key(ED25519_PUBLIC_KEY_LEN);
+    auto key = Bun::Rind::adopt(Bun__Rind__keyGenerate(namedCurve == NamedCurve::Ed25519 ? BunRindKind::Ed25519 : BunRindKind::X25519));
+    if (!key)
+        return {};
 
-    if (identifier == CryptoAlgorithmIdentifier::Ed25519) {
-        std::array<uint8_t, 32> seed;
-        Bun::Rind::Ed25519Key rindKey(Bun__Rind__ed25519Generate(seed.data(), public_key.begin()));
-        if (!rindKey)
-            return {};
-        Vector<uint8_t> private_key(std::span<const uint8_t> { seed });
-        private_key.append(public_key.span());
-        OPENSSL_cleanse(seed.data(), seed.size());
-        auto publicKey = CryptoKeyOKP::create(identifier, namedCurve, CryptoKeyType::Public, WTF::move(public_key), isPublicKeyExtractable, usages);
-        ASSERT(publicKey);
-        RefPtr<CryptoKeyOKP> privateKey = adoptRef(*new CryptoKeyOKP(identifier, namedCurve, CryptoKeyType::Private, WTF::move(private_key), extractable, usages, WTF::move(rindKey)));
+    if (namedCurve == NamedCurve::Ed25519) {
+        auto publicKey = createEd25519(CryptoKeyType::Public, Bun::Rind::adopt(Bun__Rind__keyPublicHalf(key.get())), true, usages);
+        auto privateKey = createEd25519(CryptoKeyType::Private, WTF::move(key), extractable, usages);
         return CryptoKeyPair { WTF::move(publicKey), WTF::move(privateKey) };
     }
 
-    Vector<uint8_t> private_key(X25519_PRIVATE_KEY_LEN);
-    X25519_keypair(public_key.begin(), private_key.begin());
-
-    auto publicKey = CryptoKeyOKP::create(identifier, namedCurve, CryptoKeyType::Public, WTF::move(public_key), isPublicKeyExtractable, usages);
+    auto publicKey = CryptoKeyOKP::create(identifier, namedCurve, CryptoKeyType::Public, Bun::Rind::publicKey(*key), true, usages);
     ASSERT(publicKey);
-    RefPtr<CryptoKeyOKP> privateKey = adoptRef(*new CryptoKeyOKP(identifier, namedCurve, CryptoKeyType::Private, WTF::move(private_key), extractable, usages));
+    RefPtr<CryptoKeyOKP> privateKey = adoptRef(*new CryptoKeyOKP(identifier, namedCurve, CryptoKeyType::Private, Bun::Rind::privateKey(*key), extractable, usages));
     return CryptoKeyPair { WTF::move(publicKey), WTF::move(privateKey) };
 }
 
-// Per https://www.ietf.org/rfc/rfc5280.txt
-// SubjectPublicKeyInfo ::= SEQUENCE { algorithm AlgorithmIdentifier, subjectPublicKey BIT STRING }
-// AlgorithmIdentifier  ::= SEQUENCE { algorithm OBJECT IDENTIFIER, parameters ANY DEFINED BY algorithm OPTIONAL }
-// Per https://www.rfc-editor.org/rfc/rfc8410
-// id-X25519    OBJECT IDENTIFIER ::= { 1 3 101 110 }
-// id-X448      OBJECT IDENTIFIER ::= { 1 3 101 111 }
-// id-Ed25519   OBJECT IDENTIFIER ::= { 1 3 101 112 }
-// id-Ed448     OBJECT IDENTIFIER ::= { 1 3 101 113 }
-// For all of the OIDs, the parameters MUST be absent.
 RefPtr<CryptoKeyOKP> CryptoKeyOKP::importSpki(CryptoAlgorithmIdentifier identifier, NamedCurve namedCurve, Vector<uint8_t>&& keyData, bool extractable, CryptoKeyUsageBitmap usages, bool* keyTypeMismatch)
 {
     CBS cbs;
@@ -175,6 +156,12 @@ ExceptionOr<Vector<uint8_t>> CryptoKeyOKP::exportSpki() const
 // For all of the OIDs, the parameters MUST be absent.
 RefPtr<CryptoKeyOKP> CryptoKeyOKP::importPkcs8(CryptoAlgorithmIdentifier identifier, NamedCurve namedCurve, Vector<uint8_t>&& keyData, bool extractable, CryptoKeyUsageBitmap usages, bool* keyTypeMismatch)
 {
+    if (auto key = Bun::Rind::parse(namedCurve == NamedCurve::Ed25519 ? BunRindKind::Ed25519 : BunRindKind::X25519, BunRindFormat::PKCS8, keyData.span())) {
+        if (namedCurve == NamedCurve::Ed25519)
+            return createEd25519(CryptoKeyType::Private, WTF::move(key), extractable, usages);
+        return create(identifier, namedCurve, CryptoKeyType::Private, Bun::Rind::privateKey(*key), extractable, usages);
+    }
+
     CBS cbs;
     CBS_init(&cbs, keyData.begin(), keyData.size());
     EvpPKeyPtr key(EVP_parse_private_key(&cbs));
@@ -240,23 +227,10 @@ String CryptoKeyOKP::generateJwkD() const
     return Bun::base64URLEncodeToString(m_data);
 }
 
-CryptoKeyOKP::KeyMaterial CryptoKeyOKP::ed25519PublicFromPrivate(const KeyMaterial& seed)
-{
-    auto publicKey = KeyMaterial(ED25519_PUBLIC_KEY_LEN);
-    uint8_t privateKey[ED25519_PRIVATE_KEY_LEN];
-
-    ED25519_keypair_from_seed(publicKey.begin(), privateKey, seed.begin());
-
-    return publicKey;
-}
-
 CryptoKeyOKP::KeyMaterial CryptoKeyOKP::x25519PublicFromPrivate(const KeyMaterial& privateKey)
 {
-    auto publicKey = KeyMaterial(X25519_PUBLIC_VALUE_LEN);
-
-    X25519_public_from_private(publicKey.begin(), privateKey.begin());
-
-    return publicKey;
+    auto key = Bun::Rind::adopt(Bun__Rind__keyFromPrivate(BunRindKind::X25519, privateKey.begin(), privateKey.size(), nullptr, 0));
+    return key ? Bun::Rind::publicKey(*key) : KeyMaterial();
 }
 
 String CryptoKeyOKP::generateJwkX() const
@@ -267,7 +241,7 @@ String CryptoKeyOKP::generateJwkX() const
     ASSERT(type() == CryptoKeyType::Private);
 
     if (namedCurve() == NamedCurve::Ed25519)
-        return Bun::base64URLEncodeToString(ed25519PublicFromPrivate(const_cast<KeyMaterial&>(m_data)));
+        return Bun::base64URLEncodeToString(Bun::Rind::publicKey(*m_rindKey));
 
     ASSERT(namedCurve() == NamedCurve::X25519);
     return Bun::base64URLEncodeToString(x25519PublicFromPrivate(const_cast<KeyMaterial&>(m_data)));

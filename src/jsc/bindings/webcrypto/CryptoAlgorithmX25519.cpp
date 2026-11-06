@@ -19,6 +19,7 @@
 
 #include "config.h"
 #include "CryptoAlgorithmX25519.h"
+#include "rind.h"
 
 #if ENABLE(WEB_CRYPTO)
 
@@ -63,7 +64,8 @@ void CryptoAlgorithmX25519::generateKey(const CryptoAlgorithmParameters&, bool e
 std::optional<Vector<uint8_t>> CryptoAlgorithmX25519::platformDeriveBits(const CryptoKeyOKP& baseKey, const CryptoKeyOKP& publicKey)
 {
     Vector<uint8_t> result(X25519_SHARED_KEY_LEN);
-    if (!X25519(result.begin(), baseKey.platformKey().begin(), publicKey.platformKey().begin()))
+    if (baseKey.platformKey().size() != 32 || publicKey.platformKey().size() != 32
+        || !Bun__Rind__x25519(baseKey.platformKey().begin(), publicKey.platformKey().begin(), result.begin()))
         return std::nullopt;
     return result;
 }

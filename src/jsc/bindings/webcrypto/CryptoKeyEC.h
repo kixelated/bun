@@ -51,9 +51,9 @@ public:
         P521,
     };
 
-    static Ref<CryptoKeyEC> create(CryptoAlgorithmIdentifier identifier, NamedCurve curve, CryptoKeyType type, PlatformECKeyContainer&& platformKey, bool extractable, CryptoKeyUsageBitmap usages, Bun::Rind::EcdsaKey&& rindKey = nullptr)
+    static Ref<CryptoKeyEC> create(CryptoAlgorithmIdentifier identifier, NamedCurve curve, CryptoKeyType type, Bun::Rind::Key&& rindKey, bool extractable, CryptoKeyUsageBitmap usages, PlatformECKeyContainer&& platformKey = nullptr)
     {
-        return adoptRef(*new CryptoKeyEC(identifier, curve, type, WTF::move(platformKey), extractable, usages, WTF::move(rindKey)));
+        return adoptRef(*new CryptoKeyEC(identifier, curve, type, WTF::move(rindKey), extractable, usages, WTF::move(platformKey)));
     }
     virtual ~CryptoKeyEC() = default;
 
@@ -73,17 +73,16 @@ public:
     size_t keySizeInBits() const;
     NamedCurve namedCurve() const { return m_curve; }
     String namedCurveString() const;
-    PlatformECKey platformKey() const { return m_platformKey.get(); }
-    // The curve rind signs and verifies this key's ECDSA with under `hash`, if it does.
-    static std::optional<BunRindCurve> rindCurve(NamedCurve, CryptoAlgorithmIdentifier hash);
-    // An ECDSA private key's rind key pair on a curve rind runs, built on first use.
-    const BunRindEcdsaKey* rindKey() const;
+    // BoringSSL's copy of the key, built on first use, for the paths still on BoringSSL.
+    PlatformECKey platformKey() const;
+    const BunRindKey& rindKey() const { return *m_rindKey; }
+    static BunRindKind rindKind(NamedCurve);
     static bool isValidECAlgorithm(CryptoAlgorithmIdentifier);
     static RefPtr<CryptoKeyEC> platformImportSpki(CryptoAlgorithmIdentifier, NamedCurve, Vector<uint8_t>&& keyData, bool extractable, CryptoKeyUsageBitmap, bool* keyTypeMismatch, bool* curveMismatch);
     static RefPtr<CryptoKeyEC> platformImportPkcs8(CryptoAlgorithmIdentifier, NamedCurve, Vector<uint8_t>&& keyData, bool extractable, CryptoKeyUsageBitmap, bool* keyTypeMismatch, bool* curveMismatch);
 
 private:
-    CryptoKeyEC(CryptoAlgorithmIdentifier, NamedCurve, CryptoKeyType, PlatformECKeyContainer&&, bool extractable, CryptoKeyUsageBitmap, Bun::Rind::EcdsaKey&& = nullptr);
+    CryptoKeyEC(CryptoAlgorithmIdentifier, NamedCurve, CryptoKeyType, Bun::Rind::Key&&, bool extractable, CryptoKeyUsageBitmap, PlatformECKeyContainer&&);
 
     CryptoKeyClass keyClass() const final { return CryptoKeyClass::EC; }
 
@@ -99,10 +98,10 @@ private:
     Vector<uint8_t> platformExportSpki() const;
     Vector<uint8_t> platformExportPkcs8() const;
 
-    PlatformECKeyContainer m_platformKey;
+    Bun::Rind::Key m_rindKey;
     NamedCurve m_curve;
-    mutable std::once_flag m_rindOnce;
-    mutable Bun::Rind::EcdsaKey m_rindKey;
+    mutable std::once_flag m_platformOnce;
+    mutable PlatformECKeyContainer m_platformKey;
 };
 
 } // namespace WebCore

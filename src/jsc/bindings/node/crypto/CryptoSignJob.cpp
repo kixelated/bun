@@ -111,7 +111,7 @@ void SignJobCtx::runTask(JSGlobalObject* globalObject)
         return;
     }
 
-    const auto& key = m_keyData->asymmetricKey;
+    const auto& key = m_keyData->asymmetricKey();
 
     std::optional<EVP_PKEY_CTX*> ctx;
     switch (m_mode) {
@@ -222,104 +222,63 @@ void SignJobCtx::runTask(JSGlobalObject* globalObject)
     }
 }
 
-// Runs Ed25519 without a digest, and ECDSA on P-384 and P-521 with its curve's hash, on rind.
+// Runs Ed25519 without a digest, and ECDSA over SHA-256, SHA-384, or SHA-512, on rind.
 // Returns false to leave every other key and digest to BoringSSL.
 bool SignJobCtx::runOnRind()
 {
-    const auto& key = m_keyData->asymmetricKey;
-    const uint8_t* data = m_data.begin();
-    size_t dataLen = m_data.size();
-
+    auto kind = m_keyData->rindKind();
+    if (!kind)
+        return false;
     // Ed25519 hashes on its own; BoringSSL refuses a digest for it, so leave that to report the error.
-    if (key.id() == EVP_PKEY_ED25519 && !m_digest) {
-        switch (m_mode) {
-        case Mode::Sign: {
-            auto* rindKey = m_keyData->rindEd25519Key();
-            if (!rindKey)
-                return true;
-            auto signature = DataPointer::Alloc(64);
-            if (!signature) {
-                m_opensslError = ERR_get_error();
-                return true;
-            }
-            Bun__Rind__ed25519Sign(rindKey, data, dataLen, static_cast<uint8_t*>(signature.get()));
-            m_signResult = ByteSource::allocated(signature.release());
-            return true;
-        }
-        case Mode::Verify: {
-            uint8_t publicKey[32];
-            size_t publicKeyLen = sizeof(publicKey);
-            if (!EVP_PKEY_get_raw_public_key(key.get(), publicKey, &publicKeyLen) || publicKeyLen != sizeof(publicKey)) {
-                m_opensslError = ERR_get_error();
-                return true;
-            }
-            m_verifyResult = m_signature.size() == 64
-                && Bun__Rind__ed25519Verify(publicKey, data, dataLen, m_signature.begin())
-                && !key.hasSmallOrderEdDsaPoint({ m_signature.begin(), m_signature.size() });
-            return true;
-        }
-        }
+    BunRindHash hash = BunRindHash::SHA512;
+    if (*kind == BunRindKind::Ed25519) {
+        if (m_digest)
+            return false;
+    } else {
+        auto ecdsaHash = Bun::Rind::isEc(*kind) ? Bun::Rind::hashForDigest(m_digest.get()) : std::nullopt;
+        if (!ecdsaHash)
+            return false;
+        hash = *ecdsaHash;
     }
 
-    if (key.id() != EVP_PKEY_EC || !m_digest)
+    const BunRindKey* key = m_keyData->rindKey();
+    if (!key)
         return false;
-    const EC_KEY* ecKey = EVP_PKEY_get0_EC_KEY(key.get());
-    auto curve = Bun::Rind::curveForSigning(ecKey, EVP_MD_type(m_digest.get()));
-    if (!curve)
-        return false;
-    size_t n = Bun::Rind::scalarSize(*curve);
-    uint8_t fixed[2 * 66];
+    std::span<const uint8_t> data { m_data.begin(), m_data.size() };
+    uint8_t signature[Bun::Rind::maxSignatureSize];
 
     switch (m_mode) {
     case Mode::Sign: {
-        auto* rindKey = m_keyData->rindEcdsaKey();
-        if (!rindKey || !Bun__Rind__ecdsaSign(rindKey, data, dataLen, fixed, 2 * n))
-            return true;
-        if (m_dsaSigEnc == DSASigEnc::P1363) {
-            auto signature = DataPointer::Alloc(2 * n);
-            if (!signature) {
-                m_opensslError = ERR_get_error();
-                return true;
-            }
-            memcpy(signature.get(), fixed, 2 * n);
-            m_signResult = ByteSource::allocated(signature.release());
-            return true;
-        }
-        std::unique_ptr<ECDSA_SIG, decltype(&ECDSA_SIG_free)> sig(ECDSA_SIG_new(), ECDSA_SIG_free);
-        BIGNUM* r = BN_bin2bn(fixed, n, nullptr);
-        BIGNUM* s = BN_bin2bn(fixed + n, n, nullptr);
-        uint8_t* der = nullptr;
-        size_t derLen = 0;
-        if (!sig || !r || !s || !ECDSA_SIG_set0(sig.get(), r, s)) {
-            BN_free(r);
-            BN_free(s);
+        size_t len = Bun__Rind__sign(key, hash, data.data(), data.size(), signature, sizeof(signature));
+        if (!len)
+            return false;
+        auto der = *kind == BunRindKind::Ed25519 || m_dsaSigEnc == DSASigEnc::P1363 ? ncrypto::DataPointer() : Bun::Rind::fixedToDer({ signature, len });
+        auto result = der ? WTF::move(der) : ncrypto::DataPointer::FromSpan({ signature, len });
+        if (!result) {
             m_opensslError = ERR_get_error();
             return true;
         }
-        if (!ECDSA_SIG_to_bytes(&der, &derLen, sig.get())) {
-            m_opensslError = ERR_get_error();
-            return true;
-        }
-        m_signResult = ByteSource::allocated(der, derLen);
+        m_signResult = ByteSource::allocated(result.release());
         return true;
     }
     case Mode::Verify: {
-        // The signature is DER here: P1363 input was converted when the job was made.
-        // Refuse DER that does not re-encode to itself, as BoringSSL's ECDSA_verify does.
-        std::unique_ptr<ECDSA_SIG, decltype(&ECDSA_SIG_free)> sig(ECDSA_SIG_from_bytes(m_signature.begin(), m_signature.size()), ECDSA_SIG_free);
-        uint8_t* der = nullptr;
-        size_t derLen = 0;
-        const BIGNUM* r = nullptr;
-        const BIGNUM* s = nullptr;
-        if (sig)
-            ECDSA_SIG_get0(sig.get(), &r, &s);
-        bool canonical = sig && ECDSA_SIG_to_bytes(&der, &derLen, sig.get())
-            && derLen == m_signature.size() && !memcmp(der, m_signature.begin(), derLen);
-        OPENSSL_free(der);
-        ERR_clear_error();
-        m_verifyResult = canonical
-            && BN_bn2bin_padded(fixed, n, r) && BN_bn2bin_padded(fixed + n, n, s)
-            && Bun::Rind::ecdsaVerify(*curve, ecKey, { data, dataLen }, { fixed, 2 * n });
+        std::span<const uint8_t> given { m_signature.begin(), m_signature.size() };
+        if (*kind == BunRindKind::Ed25519) {
+            uint8_t publicKey[32];
+            Bun__Rind__keyPublic(key, publicKey, sizeof(publicKey));
+            auto pkey = ncrypto::EVPKeyPointer::NewRawPublic(EVP_PKEY_ED25519, { publicKey, sizeof(publicKey) });
+            m_verifyResult = given.size() == 64
+                && Bun__Rind__verify(key, hash, data.data(), data.size(), given.data(), given.size())
+                && pkey && !pkey.hasSmallOrderEdDsaPoint({ given.data(), given.size() });
+            return true;
+        }
+        // P1363 input stays as it came, for rind keys (see fromJS).
+        size_t n = Bun::Rind::scalarSize(*kind);
+        if (m_dsaSigEnc == DSASigEnc::P1363) {
+            m_verifyResult = given.size() == 2 * n && Bun__Rind__verify(key, hash, data.data(), data.size(), given.data(), given.size());
+            return true;
+        }
+        m_verifyResult = Bun::Rind::derToFixed(given, n, signature) && Bun__Rind__verify(key, hash, data.data(), data.size(), signature, 2 * n);
         return true;
     }
     }
@@ -523,14 +482,18 @@ std::optional<SignJobCtx> SignJobCtx::fromJS(JSGlobalObject* globalObject, Throw
         // For Ed25519/Ed448 keys (one-shot variants), we intentionally leave digest
         // as null since these algorithms perform their own hashing internally and
         // don't require a separate digest algorithm.
-        if (keyObject.asymmetricKey().isRsaVariant() || keyObject.asymmetricKey().isSigVariant()) {
+        auto rindKind = keyObject.data()->rindKind();
+        if (rindKind ? Bun::Rind::isEc(*rindKind) : keyObject.asymmetricKey().isRsaVariant() || keyObject.asymmetricKey().isSigVariant()) {
             digest = Digest::FromName("SHA256"_s);
         }
     }
 
     if (mode == Mode::Verify) {
         Vector<uint8_t> signature;
-        if (keyObject.asymmetricKey().isSigVariant() && dsaSigEnc == DSASigEnc::P1363) {
+        // rind takes a P1363 signature as it is (see runOnRind).
+        auto rindKind = keyObject.data()->rindKind();
+        bool onRind = rindKind && Bun::Rind::isEc(*rindKind) && Bun::Rind::hashForDigest(digest.get());
+        if (!onRind && keyObject.asymmetricKey().isSigVariant() && dsaSigEnc == DSASigEnc::P1363) {
             convertP1363ToDER(
                 ncrypto::Buffer<const uint8_t> {
                     .data = signatureData.span().data(),

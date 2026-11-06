@@ -40,6 +40,131 @@ using namespace JSC;
 using namespace ncrypto;
 using namespace WebCore;
 
+// The DER in a PEM block of a key encoding rind parses, as OpenSSL, BoringSSL, and Node write it: the block
+// first, with no headers. Anything else is BoringSSL's to read.
+static std::optional<std::pair<BunRindFormat, WTF::Vector<uint8_t>>> rindPemToDer(std::span<const uint8_t> pem, bool allowPublic)
+{
+    std::string_view text { reinterpret_cast<const char*>(pem.data()), pem.size() };
+    static constexpr std::string_view begin = "-----BEGIN ";
+    if (!text.starts_with(begin))
+        return std::nullopt;
+    size_t labelEnd = text.find("-----\n", begin.size());
+    if (labelEnd == std::string_view::npos)
+        return std::nullopt;
+    std::string_view label = text.substr(begin.size(), labelEnd - begin.size());
+    BunRindFormat format;
+    if (label == "PRIVATE KEY")
+        format = BunRindFormat::PKCS8;
+    else if (label == "EC PRIVATE KEY")
+        format = BunRindFormat::SEC1;
+    else if (label == "PUBLIC KEY" && allowPublic)
+        format = BunRindFormat::SPKI;
+    else
+        return std::nullopt;
+
+    size_t bodyStart = labelEnd + 6;
+    std::string end = "\n-----END " + std::string(label) + "-----";
+    size_t bodyEnd = text.find(end, bodyStart);
+    if (bodyEnd == std::string_view::npos)
+        return std::nullopt;
+
+    WTF::Vector<uint8_t> base64;
+    for (char c : text.substr(bodyStart, bodyEnd - bodyStart)) {
+        if (c == '\n' || c == '\r')
+            continue;
+        if (!isASCIIAlphanumeric(c) && c != '+' && c != '/' && c != '=')
+            return std::nullopt;
+        base64.append(c);
+    }
+    size_t maxLen;
+    if (!EVP_DecodedLength(&maxLen, base64.size()))
+        return std::nullopt;
+    WTF::Vector<uint8_t> der(maxLen);
+    size_t len;
+    if (!EVP_DecodeBase64(der.begin(), &len, der.size(), base64.begin(), base64.size()))
+        return std::nullopt;
+    der.shrink(len);
+    return std::make_pair(format, WTF::move(der));
+}
+
+// rind's parse of a key in an encoding it writes; null for anything else, which is BoringSSL's to read.
+static Bun::Rind::Key rindParseKey(std::span<const uint8_t> data, const EVPKeyPointer::PrivateKeyEncodingConfig& config, bool allowPublic)
+{
+    if (config.format == EVPKeyPointer::PKFormatType::PEM) {
+        auto der = rindPemToDer(data, allowPublic);
+        return der ? Bun::Rind::parse(BunRindKind::Any, der->first, der->second.span()) : nullptr;
+    }
+    if (config.format != EVPKeyPointer::PKFormatType::DER)
+        return nullptr;
+    switch (config.type) {
+    case EVPKeyPointer::PKEncodingType::PKCS8:
+        return Bun::Rind::parse(BunRindKind::Any, BunRindFormat::PKCS8, data);
+    case EVPKeyPointer::PKEncodingType::SEC1:
+        return Bun::Rind::parse(BunRindKind::Any, BunRindFormat::SEC1, data);
+    case EVPKeyPointer::PKEncodingType::SPKI:
+        return allowPublic ? Bun::Rind::parse(BunRindKind::Any, BunRindFormat::SPKI, data) : nullptr;
+    default:
+        return nullptr;
+    }
+}
+
+// A rind key's encoding in `format` and `type`, as BoringSSL writes it unencrypted; nullopt for any other
+// encoding, which is BoringSSL's to write.
+static std::optional<JSValue> rindExportKey(JSGlobalObject* lexicalGlobalObject, ThrowScope& scope, const BunRindKey& key, EVPKeyPointer::PKFormatType format, std::optional<EVPKeyPointer::PKEncodingType> type, bool hasCipher)
+{
+    if (hasCipher || !type || (format != EVPKeyPointer::PKFormatType::DER && format != EVPKeyPointer::PKFormatType::PEM))
+        return std::nullopt;
+    BunRindFormat rindFormat;
+    ASCIILiteral label;
+    switch (*type) {
+    case EVPKeyPointer::PKEncodingType::PKCS8:
+        rindFormat = BunRindFormat::PKCS8;
+        label = "PRIVATE KEY"_s;
+        break;
+    case EVPKeyPointer::PKEncodingType::SEC1:
+        rindFormat = BunRindFormat::SEC1;
+        label = "EC PRIVATE KEY"_s;
+        break;
+    case EVPKeyPointer::PKEncodingType::SPKI:
+        rindFormat = BunRindFormat::SPKI;
+        label = "PUBLIC KEY"_s;
+        break;
+    default:
+        return std::nullopt;
+    }
+    auto der = Bun::Rind::exportKey(key, rindFormat);
+    if (der.isEmpty())
+        return std::nullopt;
+
+    VM& vm = lexicalGlobalObject->vm();
+    if (format == EVPKeyPointer::PKFormatType::DER) {
+        auto* globalObject = defaultGlobalObject(lexicalGlobalObject);
+        auto buf = JSC::ArrayBuffer::tryCreate(der.span());
+        OPENSSL_cleanse(der.begin(), der.size());
+        if (!buf) {
+            throwOutOfMemoryError(lexicalGlobalObject, scope);
+            return JSValue();
+        }
+        size_t len = buf->byteLength();
+        return JSUint8Array::create(lexicalGlobalObject, globalObject->JSBufferSubclassStructure(), WTF::move(buf), 0, len);
+    }
+
+    size_t base64Len;
+    EVP_EncodedLength(&base64Len, der.size());
+    WTF::Vector<uint8_t> base64(base64Len);
+    base64.shrink(EVP_EncodeBlock(base64.begin(), der.begin(), der.size()));
+    OPENSSL_cleanse(der.begin(), der.size());
+    StringBuilder pem;
+    pem.append("-----BEGIN "_s, label, "-----\n"_s);
+    for (size_t i = 0; i < base64.size(); i += 64) {
+        pem.append(byteCast<Latin1Character>(base64.span().subspan(i, std::min<size_t>(64, base64.size() - i))));
+        pem.append('\n');
+    }
+    pem.append("-----END "_s, label, "-----\n"_s);
+    OPENSSL_cleanse(base64.begin(), base64.size());
+    return jsString(vm, pem.toString());
+}
+
 // DEP0203: passing a WebCrypto CryptoKey (instead of a KeyObject) to node:crypto
 // functions is deprecated but still accepted. Emitted at most once per realm, like Node.
 static void emitCryptoKeyDeprecationWarning(JSGlobalObject* globalObject)
@@ -119,7 +244,7 @@ JSC::JSValue KeyObject::exportJwkAkpKey(JSC::JSGlobalObject* lexicalGlobalObject
     ncrypto::MarkPopErrorOnReturn markPopError;
     VM& vm = lexicalGlobalObject->vm();
 
-    const auto& pkey = m_data->asymmetricKey;
+    const auto& pkey = m_data->asymmetricKey();
     ASCIILiteral name = pqcNidToKeyTypeName(pkey.id());
     ASSERT(!name.isNull());
 
@@ -157,12 +282,21 @@ JSC::JSValue KeyObject::exportJwkEdKey(JSC::JSGlobalObject* lexicalGlobalObject,
     VM& vm = lexicalGlobalObject->vm();
     auto& commonStrings = Bun::commonStrings(vm);
 
-    const auto& pkey = m_data->asymmetricKey;
+    const BunRindKey* rindKey = m_data->fromRind() ? m_data->rindKey() : nullptr;
+    int id = !rindKey ? m_data->asymmetricKey().id() : *m_data->rindKind() == BunRindKind::Ed25519 ? EVP_PKEY_ED25519 : EVP_PKEY_X25519;
+    auto raw = [&](bool isPrivate) {
+        if (!rindKey)
+            return isPrivate ? m_data->asymmetricKey().rawPrivateKey() : m_data->asymmetricKey().rawPublicKey();
+        auto bytes = isPrivate ? Bun::Rind::privateKey(*rindKey) : Bun::Rind::publicKey(*rindKey);
+        auto result = ncrypto::DataPointer::FromSpan(bytes.span());
+        OPENSSL_cleanse(bytes.begin(), bytes.size());
+        return result;
+    };
 
     JSObject* jwk = JSC::constructEmptyObject(lexicalGlobalObject);
 
     ASCIILiteral curve = ([&] {
-        switch (pkey.id()) {
+        switch (id) {
         case EVP_PKEY_ED25519:
             return "Ed25519"_s;
         case EVP_PKEY_ED448:
@@ -190,7 +324,7 @@ JSC::JSValue KeyObject::exportJwkEdKey(JSC::JSGlobalObject* lexicalGlobalObject,
         Identifier::fromString(vm, crvKey),
         jsString(vm, makeString(curve)));
 
-    ncrypto::DataPointer publicData = pkey.rawPublicKey();
+    ncrypto::DataPointer publicData = raw(false);
     JSValue encoded = JSValue::decode(StringBytes::encode(lexicalGlobalObject, scope, publicData.span(), BufferEncodingType::base64url));
     RETURN_IF_EXCEPTION(scope, {});
     auto xKey = commonStrings.jwkXString()->value(lexicalGlobalObject);
@@ -201,7 +335,7 @@ JSC::JSValue KeyObject::exportJwkEdKey(JSC::JSGlobalObject* lexicalGlobalObject,
         encoded);
 
     if (exportType == CryptoKeyType::Private) {
-        ncrypto::DataPointer privateData = pkey.rawPrivateKey();
+        ncrypto::DataPointer privateData = raw(true);
 
         JSValue encoded = JSValue::decode(StringBytes::encode(lexicalGlobalObject, scope, privateData.span(), BufferEncodingType::base64url));
         RETURN_IF_EXCEPTION(scope, {});
@@ -221,7 +355,39 @@ JSC::JSValue KeyObject::exportJwkEcKey(JSC::JSGlobalObject* lexicalGlobalObject,
     VM& vm = lexicalGlobalObject->vm();
     auto& commonStrings = Bun::commonStrings(vm);
 
-    const auto& pkey = m_data->asymmetricKey;
+    if (m_data->fromRind()) {
+        const BunRindKey& key = *m_data->rindKey();
+        auto kind = *m_data->rindKind();
+        size_t n = Bun::Rind::scalarSize(kind);
+        auto point = Bun::Rind::publicKey(key);
+        JSObject* jwk = JSC::constructEmptyObject(lexicalGlobalObject);
+        auto put = [&](JSString* name, std::span<const uint8_t> bytes) {
+            JSValue encoded = JSValue::decode(StringBytes::encode(lexicalGlobalObject, scope, bytes, BufferEncodingType::base64url));
+            RETURN_IF_EXCEPTION(scope, );
+            auto nameValue = name->value(lexicalGlobalObject);
+            RETURN_IF_EXCEPTION(scope, );
+            jwk->putDirect(vm, Identifier::fromString(vm, nameValue), encoded);
+        };
+        auto ktyKey = commonStrings.jwkKtyString()->value(lexicalGlobalObject);
+        RETURN_IF_EXCEPTION(scope, {});
+        jwk->putDirect(vm, Identifier::fromString(vm, ktyKey), commonStrings.jwkEcString());
+        put(commonStrings.jwkXString(), point.subspan(1, n));
+        RETURN_IF_EXCEPTION(scope, {});
+        put(commonStrings.jwkYString(), point.subspan(1 + n, n));
+        RETURN_IF_EXCEPTION(scope, {});
+        auto crvKey = commonStrings.jwkCrvString()->value(lexicalGlobalObject);
+        RETURN_IF_EXCEPTION(scope, {});
+        jwk->putDirect(vm, Identifier::fromString(vm, crvKey), jsString(vm, String(kind == BunRindKind::P256 ? "P-256"_s : kind == BunRindKind::P384 ? "P-384"_s : "P-521"_s)));
+        if (exportType == CryptoKeyType::Private) {
+            auto d = Bun::Rind::privateKey(key);
+            put(commonStrings.jwkDString(), d.span());
+            OPENSSL_cleanse(d.begin(), d.size());
+            RETURN_IF_EXCEPTION(scope, {});
+        }
+        return jwk;
+    }
+
+    const auto& pkey = m_data->asymmetricKey();
     ASSERT(pkey.id() == EVP_PKEY_EC);
 
     const EC_KEY* ec = pkey;
@@ -300,7 +466,7 @@ JSC::JSValue KeyObject::exportJwkRsaKey(JSC::JSGlobalObject* lexicalGlobalObject
 
     JSObject* jwk = JSC::constructEmptyObject(lexicalGlobalObject);
 
-    const auto& pkey = m_data->asymmetricKey;
+    const auto& pkey = m_data->asymmetricKey();
     const ncrypto::Rsa rsa = pkey;
 
     auto publicKey = rsa.getPublicKey();
@@ -360,7 +526,7 @@ JSC::JSValue KeyObject::exportJwkSecretKey(JSC::JSGlobalObject* lexicalGlobalObj
 
 JSC::JSValue KeyObject::exportJwkAsymmetricKey(JSC::JSGlobalObject* globalObject, JSC::ThrowScope& scope, CryptoKeyType exportType, bool handleRsaPss)
 {
-    switch (m_data->asymmetricKey.id()) {
+    switch (m_data->asymmetricKey().id()) {
     case EVP_PKEY_RSA_PSS: {
         if (handleRsaPss) {
             return exportJwkRsaKey(globalObject, scope, exportType);
@@ -381,7 +547,7 @@ JSC::JSValue KeyObject::exportJwkAsymmetricKey(JSC::JSGlobalObject* globalObject
         return exportJwkEdKey(globalObject, scope, exportType);
 
     default:
-        if (isMlDsaNid(m_data->asymmetricKey.id()) || isMlKemNid(m_data->asymmetricKey.id()))
+        if (isMlDsaNid(m_data->asymmetricKey().id()) || isMlKemNid(m_data->asymmetricKey().id()))
             return exportJwkAkpKey(globalObject, scope, exportType);
         break;
     }
@@ -417,7 +583,26 @@ JSC::JSValue KeyObject::exportRaw(JSC::JSGlobalObject* globalObject, JSC::ThrowS
 {
     ASSERT(type() != CryptoKeyType::Secret);
 
-    const ncrypto::EVPKeyPointer& pkey = m_data->asymmetricKey;
+    if (m_data->fromRind()) {
+        const BunRindKey& key = *m_data->rindKey();
+        bool isEc = Bun::Rind::isEc(*m_data->rindKind());
+        WTF::Vector<uint8_t> raw;
+        if (format == ncrypto::EVPKeyPointer::PKFormatType::RawPublic && (!isEc || ecPointForm == POINT_CONVERSION_UNCOMPRESSED))
+            raw = Bun::Rind::publicKey(key);
+        else if (format == ncrypto::EVPKeyPointer::PKFormatType::RawPrivate && type() == CryptoKeyType::Private)
+            raw = Bun::Rind::privateKey(key);
+        if (!raw.isEmpty()) {
+            auto buf = ncrypto::DataPointer::FromSpan(raw.span());
+            OPENSSL_cleanse(raw.begin(), raw.size());
+            if (!buf) {
+                throwOutOfMemoryError(globalObject, scope);
+                return {};
+            }
+            return dataPointerToBuffer(globalObject, scope, WTF::move(buf));
+        }
+    }
+
+    const ncrypto::EVPKeyPointer& pkey = m_data->asymmetricKey();
     const int id = pkey.id();
 
     if (format == ncrypto::EVPKeyPointer::PKFormatType::RawPublic) {
@@ -562,7 +747,12 @@ JSC::JSValue KeyObject::exportPublic(JSC::JSGlobalObject* lexicalGlobalObject, J
         return exportRaw(lexicalGlobalObject, scope, config.format, config.ec_point_form);
     }
 
-    const ncrypto::EVPKeyPointer& pkey = m_data->asymmetricKey;
+    if (m_data->fromRind()) {
+        if (auto result = rindExportKey(lexicalGlobalObject, scope, *m_data->rindKey(), config.format, config.type, false))
+            return *result;
+    }
+
+    const ncrypto::EVPKeyPointer& pkey = m_data->asymmetricKey();
     auto res = pkey.writePublicKey(config);
     if (!res) {
         throwCryptoError(lexicalGlobalObject, scope, res.openssl_error.value_or(0), "Failed to encode public key");
@@ -594,7 +784,12 @@ JSValue KeyObject::exportPrivate(JSGlobalObject* lexicalGlobalObject, ThrowScope
         return exportRaw(lexicalGlobalObject, scope, config.format, config.ec_point_form);
     }
 
-    const ncrypto::EVPKeyPointer& pkey = m_data->asymmetricKey;
+    if (m_data->fromRind() && Bun__Rind__keyIsPrivate(m_data->rindKey())) {
+        if (auto result = rindExportKey(lexicalGlobalObject, scope, *m_data->rindKey(), config.format, config.type, !!config.cipher))
+            return *result;
+    }
+
+    const ncrypto::EVPKeyPointer& pkey = m_data->asymmetricKey();
     auto res = pkey.writePrivateKey(config);
     if (!res) {
         throwCryptoError(lexicalGlobalObject, scope, res.openssl_error.value_or(0), "Failed to encode private key");
@@ -666,7 +861,7 @@ JSValue KeyObject::exportAsymmetric(JSGlobalObject* globalObject, ThrowScope& sc
                 }
 
                 int form = POINT_CONVERSION_UNCOMPRESSED;
-                if (rawFormat == ncrypto::EVPKeyPointer::PKFormatType::RawPublic && m_data->asymmetricKey.id() == EVP_PKEY_EC) {
+                if (rawFormat == ncrypto::EVPKeyPointer::PKFormatType::RawPublic && m_data->asymmetricKey().id() == EVP_PKEY_EC) {
                     JSValue typeValue = options->get(globalObject, Identifier::fromString(vm, "type"_s));
                     RETURN_IF_EXCEPTION(scope, {});
                     if (!typeValue.isUndefined()) {
@@ -760,7 +955,10 @@ JSValue KeyObject::asymmetricKeyType(JSGlobalObject* globalObject)
         return jsUndefined();
     }
 
-    switch (m_data->asymmetricKey.id()) {
+    if (auto kind = m_data->rindKind())
+        return jsNontrivialString(vm, *kind == BunRindKind::Ed25519 ? "ed25519"_s : *kind == BunRindKind::X25519 ? "x25519"_s : "ec"_s);
+
+    switch (m_data->asymmetricKey().id()) {
     case EVP_PKEY_RSA:
         return jsNontrivialString(vm, "rsa"_s);
     case EVP_PKEY_RSA_PSS:
@@ -780,7 +978,7 @@ JSValue KeyObject::asymmetricKeyType(JSGlobalObject* globalObject)
     case EVP_PKEY_X448:
         return jsNontrivialString(vm, "x448"_s);
     default:
-        if (ASCIILiteral pqcName = pqcNidToKeyTypeName(m_data->asymmetricKey.id()))
+        if (ASCIILiteral pqcName = pqcNidToKeyTypeName(m_data->asymmetricKey().id()))
             return jsNontrivialString(vm, WTF::String(pqcName));
         return jsUndefined();
     }
@@ -790,7 +988,7 @@ void KeyObject::getRsaKeyDetails(JSGlobalObject* globalObject, ThrowScope& scope
 {
     VM& vm = globalObject->vm();
 
-    const auto& pkey = m_data->asymmetricKey;
+    const auto& pkey = m_data->asymmetricKey();
     const ncrypto::Rsa rsa = pkey;
     if (!rsa) {
         return;
@@ -835,7 +1033,7 @@ void KeyObject::getDsaKeyDetails(JSC::JSGlobalObject* globalObject, JSC::ThrowSc
 {
     VM& vm = globalObject->vm();
 
-    const ncrypto::Dsa dsa = m_data->asymmetricKey;
+    const ncrypto::Dsa dsa = m_data->asymmetricKey();
     if (!dsa) {
         return;
     }
@@ -851,12 +1049,7 @@ void KeyObject::getEcKeyDetails(JSC::JSGlobalObject* globalObject, JSC::ThrowSco
 {
     VM& vm = globalObject->vm();
 
-    const auto& pkey = m_data->asymmetricKey;
-    ASSERT(pkey.id() == EVP_PKEY_EC);
-    const EC_KEY* ec = pkey;
-
-    const auto group = ncrypto::ECKeyPointer::GetGroup(ec);
-    int nid = EC_GROUP_get_curve_name(group);
+    int nid = m_data->rindKind() ? Bun::Rind::curveNidForKind(*m_data->rindKind()) : EC_GROUP_get_curve_name(ncrypto::ECKeyPointer::GetGroup(m_data->asymmetricKey()));
 
     String namedCurve = String::fromUTF8(OBJ_nid2sn(nid));
 
@@ -871,7 +1064,13 @@ JSObject* KeyObject::asymmetricKeyDetails(JSGlobalObject* globalObject, ThrowSco
         return result;
     }
 
-    switch (m_data->asymmetricKey.id()) {
+    if (auto kind = m_data->rindKind()) {
+        if (Bun::Rind::isEc(*kind))
+            getEcKeyDetails(globalObject, scope, result);
+        return result;
+    }
+
+    switch (m_data->asymmetricKey().id()) {
     case EVP_PKEY_RSA:
     case EVP_PKEY_RSA_PSS:
         getRsaKeyDetails(globalObject, scope, result);
@@ -914,8 +1113,8 @@ std::optional<bool> KeyObject::equals(const KeyObject& other) const
     }
     case CryptoKeyType::Public:
     case CryptoKeyType::Private: {
-        EVP_PKEY* thisKey = m_data->asymmetricKey.get();
-        EVP_PKEY* otherKey = other.m_data->asymmetricKey.get();
+        EVP_PKEY* thisKey = m_data->asymmetricKey().get();
+        EVP_PKEY* otherKey = other.m_data->asymmetricKey().get();
 
         int ok = EVP_PKEY_cmp(thisKey, otherKey);
         if (ok == -2) {
@@ -1314,6 +1513,25 @@ __attribute__((minsize)) KeyObject KeyObject::getKeyObjectHandleFromJwk(JSGlobal
         MarkPopErrorOnReturn markPopError;
 
         auto material = (privBuf ? privBuf : pubBuf)->span();
+        if (nid == EVP_PKEY_ED25519 || nid == EVP_PKEY_X25519) {
+            auto kind = nid == EVP_PKEY_ED25519 ? BunRindKind::Ed25519 : BunRindKind::X25519;
+            auto publicKey = pubBuf->span();
+            auto key = Bun::Rind::adopt(privBuf
+                    ? Bun__Rind__keyFromPrivate(kind, material.data(), material.size(), publicKey.data(), publicKey.size())
+                    : Bun__Rind__keyFromPublic(kind, publicKey.data(), publicKey.size()));
+            // An empty public key is no check of the private key's.
+            if (!key || (privBuf && publicKey.empty())) {
+                ERR::CRYPTO_INVALID_JWK(scope, globalObject, invalidKey);
+                return {};
+            }
+            if (keyType == CryptoKeyType::Private && jwkType == CryptoKeyType::Public) {
+                ERR::CRYPTO_INVALID_JWK(scope, globalObject, "JWK does not contain private key material"_s);
+                return {};
+            }
+            JSC::ensureStillAliveHere(pubBuf);
+            JSC::ensureStillAliveHere(privBuf);
+            return create(keyType, KeyObjectData::create(WTF::move(key)));
+        }
         ncrypto::Buffer<const unsigned char> raw { material.data(), material.size() };
         ncrypto::EVPKeyPointer key = isAkp
             ? (privBuf ? newFromPrivateSeed(nid, material) : newFromRawPublic(nid, material))
@@ -1380,6 +1598,33 @@ __attribute__((minsize)) KeyObject KeyObject::getKeyObjectHandleFromJwk(JSGlobal
         RETURN_IF_EXCEPTION(scope, {});
         BignumPointer y = jwkStringToBn(globalObject, scope, yValue, "key.y"_s);
         RETURN_IF_EXCEPTION(scope, {});
+
+        if (auto kind = Bun::Rind::kindForCurveNid(nid)) {
+            size_t n = Bun::Rind::scalarSize(*kind);
+            uint8_t point[Bun::Rind::maxPublicKeySize] = { 0x04 };
+            size_t pointLen = 1 + 2 * n;
+            bool ok = x && y && BN_bn2bin_padded(point + 1, n, x.get()) && BN_bn2bin_padded(point + 1 + n, n, y.get());
+            auto key = ok ? Bun::Rind::adopt(Bun__Rind__keyFromPublic(*kind, point, pointLen)) : nullptr;
+            if (!key) {
+                ERR::CRYPTO_INVALID_JWK(scope, globalObject, invalidKey);
+                return {};
+            }
+            if (isPrivate) {
+                BignumPointer d = jwkStringToBn(globalObject, scope, dValue, "key.d"_s);
+                RETURN_IF_EXCEPTION(scope, {});
+                uint8_t scalar[66];
+                key = d && BN_bn2bin_padded(scalar, n, d.get()) ? Bun::Rind::adopt(Bun__Rind__keyFromPrivate(*kind, scalar, n, point, pointLen)) : nullptr;
+                OPENSSL_cleanse(scalar, sizeof(scalar));
+                if (!key) {
+                    ERR::CRYPTO_INVALID_JWK(scope, globalObject, invalidKey);
+                    return {};
+                }
+            } else if (keyType == CryptoKeyType::Private) {
+                ERR::CRYPTO_INVALID_JWK(scope, globalObject, "JWK does not contain private key material"_s);
+                return {};
+            }
+            return create(keyType, KeyObjectData::create(WTF::move(key)));
+        }
 
         if (!ec.setPublicKeyRaw(x, y)) {
             ERR::CRYPTO_INVALID_JWK(scope, globalObject, invalidKey);
@@ -1707,6 +1952,9 @@ KeyObject KeyObject::getPublicOrPrivateKey(
             KeyEncodingContext::Input);
         RETURN_IF_EXCEPTION(scope, {});
 
+        if (auto key = rindParseKey(keyData, config, false))
+            return create(CryptoKeyType::Private, KeyObjectData::create(WTF::move(key)));
+
         auto res = EVPKeyPointer::TryParsePrivateKey(config, buf);
         if (res) {
             return create(CryptoKeyType::Private, WTF::move(res.value));
@@ -1734,6 +1982,9 @@ KeyObject KeyObject::getPublicOrPrivateKey(
         WTF::move(passphrase),
         KeyEncodingContext::Input);
     RETURN_IF_EXCEPTION(scope, {});
+
+    if (auto key = rindParseKey(keyData, config, true))
+        return create(CryptoKeyType::Public, KeyObjectData::create(WTF::move(key)));
 
     if (config.format == EVPKeyPointer::PKFormatType::PEM) {
         auto publicRes = EVPKeyPointer::TryParsePublicKeyPEM(buf);

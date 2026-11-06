@@ -2,6 +2,7 @@
 #include "CryptoUtil.h"
 #include "NodeValidator.h"
 #include "ErrorCode.h"
+#include "rind.h"
 
 using namespace Bun;
 using namespace JSC;
@@ -18,6 +19,8 @@ void NidKeyPairJobCtx::deinit()
 
 extern "C" void Bun__NidKeyPairJobCtx__runTask(NidKeyPairJobCtx* ctx, JSGlobalObject* globalObject)
 {
+    if (ctx->generateOnRind())
+        return;
     ncrypto::EVPKeyCtxPointer keyCtx = ctx->setup();
     if (!keyCtx) {
         return;
@@ -35,6 +38,17 @@ void NidKeyPairJob::createAndSchedule(JSGlobalObject* globalObject, NidKeyPairJo
 {
     NidKeyPairJobCtx* ctxCopy = new NidKeyPairJobCtx(WTF::move(ctx));
     Bun__NidKeyPairJob__createAndSchedule(globalObject, ctxCopy, JSValue::encode(callback));
+}
+
+// Generates an Ed25519 or X25519 key on rind. Returns false to leave every other type to BoringSSL.
+bool NidKeyPairJobCtx::generateOnRind()
+{
+    if (m_id != EVP_PKEY_ED25519 && m_id != EVP_PKEY_X25519)
+        return false;
+    auto key = Bun::Rind::adopt(Bun__Rind__keyGenerate(m_id == EVP_PKEY_ED25519 ? BunRindKind::Ed25519 : BunRindKind::X25519));
+    if (key)
+        m_keyObj = KeyObject::create(CryptoKeyType::Private, KeyObjectData::create(WTF::move(key)));
+    return true;
 }
 
 ncrypto::EVPKeyCtxPointer NidKeyPairJobCtx::setup()

@@ -202,6 +202,8 @@ JSC_DEFINE_HOST_FUNCTION(jsSignProtoFuncInit, (JSC::JSGlobalObject * globalObjec
 
     // Store the initialized context in the JSSign object
     thisObject->m_mdCtx = WTF::move(mdCtx);
+    auto rindHash = Bun::Rind::hashForDigest(digest);
+    thisObject->m_rindDigest.reset(rindHash ? Bun__Rind__digestNew(*rindHash) : nullptr);
 
     if (!thisObject->m_sizeForGC) {
         thisObject->m_sizeForGC = sizeof(EVP_MD_CTX);
@@ -228,6 +230,11 @@ void updateWithBufferView(JSGlobalObject* globalObject, JSSign* sign, JSC::JSArr
 
     if (!sign->m_mdCtx) {
         ERR::CRYPTO_INVALID_STATE(scope, globalObject, "Not initialised"_s);
+        return;
+    }
+
+    if (sign->m_rindDigest) {
+        Bun__Rind__digestUpdate(sign->m_rindDigest.get(), static_cast<const uint8_t*>(buffer.data), buffer.len);
         return;
     }
 
@@ -299,7 +306,7 @@ JSC_DEFINE_HOST_FUNCTION(jsSignProtoFuncUpdate, (JSC::JSGlobalObject * globalObj
     return JSValue::encode(wrappedSign);
 }
 
-JSUint8Array* signWithKey(JSC::JSGlobalObject* lexicalGlobalObject, JSSign* thisObject, const ncrypto::EVPKeyPointer& pkey, DSASigEnc dsa_sig_enc, int padding, std::optional<int> salt_len)
+JSUint8Array* signWithKey(JSC::JSGlobalObject* lexicalGlobalObject, JSSign* thisObject, const KeyObjectData& keyData, DSASigEnc dsa_sig_enc, int padding, std::optional<int> salt_len)
 {
     JSC::VM& vm = lexicalGlobalObject->vm();
     auto scope = DECLARE_THROW_SCOPE(vm);
@@ -312,7 +319,30 @@ JSUint8Array* signWithKey(JSC::JSGlobalObject* lexicalGlobalObject, JSSign* this
 
     // Move mdCtx out of JSSign object
     ncrypto::EVPMDCtxPointer mdCtx = WTF::move(thisObject->m_mdCtx);
+    Bun::Rind::Digest rindDigest(thisObject->m_rindDigest ? Bun__Rind__digestFinish(thisObject->m_rindDigest.release()) : nullptr);
     thisObject->m_sizeForGC = 0;
+    auto* globalObject = defaultGlobalObject(lexicalGlobalObject);
+
+    // ECDSA over a SHA-2 digest signs on rind.
+    if (rindDigest && keyData.rindKind() && Bun::Rind::isEc(*keyData.rindKind())) {
+        const BunRindKey* key = keyData.rindKey();
+        uint8_t fixed[Bun::Rind::maxSignatureSize];
+        size_t fixedLen = key ? Bun__Rind__signDigest(key, rindDigest.get(), fixed, sizeof(fixed)) : 0;
+        if (!fixedLen) {
+            throwCryptoError(lexicalGlobalObject, scope, 0, "Failed to create signature"_s);
+            return nullptr;
+        }
+        auto der = dsa_sig_enc == DSASigEnc::P1363 ? ncrypto::DataPointer() : Bun::Rind::fixedToDer({ fixed, fixedLen });
+        auto signature = dsa_sig_enc == DSASigEnc::P1363 ? std::span<const uint8_t> { fixed, fixedLen } : der.span();
+        auto sigBuffer = JSC::ArrayBuffer::tryCreate(signature);
+        if (!sigBuffer || signature.empty()) {
+            throwTypeError(lexicalGlobalObject, scope, "Failed to allocate signature buffer"_s);
+            return nullptr;
+        }
+        RELEASE_AND_RETURN(scope, JSC::JSUint8Array::create(lexicalGlobalObject, globalObject->JSBufferSubclassStructure(), WTF::move(sigBuffer), 0, signature.size()));
+    }
+
+    const ncrypto::EVPKeyPointer& pkey = keyData.asymmetricKey();
 
     // Validate DSA parameters
     if (!pkey.validateDsaParameters()) {
@@ -321,7 +351,10 @@ JSUint8Array* signWithKey(JSC::JSGlobalObject* lexicalGlobalObject, JSSign* this
     }
 
     // Get the final digest
-    auto data = mdCtx.digestFinal(mdCtx.getExpectedSize());
+    uint8_t rindDigestBytes[64];
+    auto data = rindDigest
+        ? ncrypto::DataPointer::FromSpan({ rindDigestBytes, Bun__Rind__digestBytes(rindDigest.get(), rindDigestBytes) })
+        : mdCtx.digestFinal(mdCtx.getExpectedSize());
     if (!data) {
         throwTypeError(lexicalGlobalObject, scope, "Failed to finalize digest"_s);
         return nullptr;
@@ -411,7 +444,6 @@ JSUint8Array* signWithKey(JSC::JSGlobalObject* lexicalGlobalObject, JSSign* this
     }
 
     // Create and return JSUint8Array
-    auto* globalObject = defaultGlobalObject(lexicalGlobalObject);
     RELEASE_AND_RETURN(scope, JSC::JSUint8Array::create(lexicalGlobalObject, globalObject->JSBufferSubclassStructure(), WTF::move(sigBuffer), 0, finalSignatureLength));
 }
 
@@ -474,14 +506,13 @@ JSC_DEFINE_HOST_FUNCTION(jsSignProtoFuncSign, (JSC::JSGlobalObject * lexicalGlob
         RETURN_IF_EXCEPTION(scope, {});
     }
 
-    const ncrypto::EVPKeyPointer& keyPtr = keyObject.asymmetricKey();
-
-    if (keyPtr.isOneShotVariant()) {
+    auto rindKind = keyObject.data()->rindKind();
+    if (rindKind ? *rindKind == BunRindKind::Ed25519 : keyObject.asymmetricKey().isOneShotVariant()) {
         return ERR::CRYPTO_UNSUPPORTED_OPERATION(scope, lexicalGlobalObject);
     }
 
     // Use the signWithKey function to perform the signing operation
-    JSUint8Array* signature = signWithKey(lexicalGlobalObject, thisObject, keyPtr, dsaSigEnc, padding, saltLen);
+    JSUint8Array* signature = signWithKey(lexicalGlobalObject, thisObject, *keyObject.data(), dsaSigEnc, padding, saltLen);
     EXCEPTION_ASSERT(!!signature == !scope.exception());
     RETURN_IF_EXCEPTION(scope, {});
 

@@ -4,6 +4,7 @@
 #include "JSBuffer.h"
 #include "helpers.h"
 #include "ncrypto.h"
+#include "rind.h"
 #include "CryptoUtil.h"
 #include <JavaScriptCore/LazyProperty.h>
 #include <JavaScriptCore/LazyPropertyInlines.h>
@@ -34,6 +35,8 @@ public:
     DECLARE_VISIT_CHILDREN;
 
     ncrypto::EVPMDCtxPointer m_mdCtx;
+    // SHA-256, SHA-384, and SHA-512 hash on rind instead of m_mdCtx, so rind can sign or verify the digest.
+    Bun::Rind::DigestContext m_rindDigest;
     size_t m_sizeForGC { 0 };
 
 private:

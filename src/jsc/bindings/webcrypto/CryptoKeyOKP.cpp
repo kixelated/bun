@@ -68,29 +68,20 @@ RefPtr<CryptoKeyOKP> CryptoKeyOKP::create(CryptoAlgorithmIdentifier identifier, 
     if (bytesExpectedInternal == -1)
         return nullptr;
 
-    if (type == CryptoKeyType::Private && curve == NamedCurve::Ed25519) {
-        auto bytesExpectedExternal = externalKeySizeInBytesFromNamedCurve(curve);
-        if (bytesExpectedExternal == -1)
+    if (curve == NamedCurve::Ed25519) {
+        // A private key is imported as its seed, and may carry its public key after it, which must match.
+        Bun::Rind::Key key;
+        if (type == CryptoKeyType::Private) {
+            if (platformKey.size() != 32 && platformKey.size() != 64)
+                return nullptr;
+            auto publicKey = platformKey.span().subspan(32);
+            key = Bun::Rind::adopt(Bun__Rind__keyFromPrivate(BunRindKind::Ed25519, platformKey.begin(), 32, publicKey.data(), publicKey.size()));
+        } else if (platformKey.size() == bytesExpectedInternal) {
+            key = Bun::Rind::adopt(Bun__Rind__keyFromPublic(BunRindKind::Ed25519, platformKey.begin(), platformKey.size()));
+        }
+        if (!key)
             return nullptr;
-
-        // We need to match the internal format when importing a private key
-        // Import format only consists of 32 bytes of private key
-        // Internal format is private key + public key suffix
-        if (platformKey.size() != bytesExpectedExternal && platformKey.size() != bytesExpectedInternal)
-            return nullptr;
-
-        auto seed = platformKey.span().first(bytesExpectedExternal);
-        std::array<uint8_t, 32> publicKey;
-        Bun::Rind::Ed25519Key rindKey(Bun__Rind__ed25519FromSeed(seed.data(), publicKey.data()));
-        if (!rindKey)
-            return nullptr;
-
-        if (platformKey.size() == bytesExpectedInternal && constantTimeMemcmp(std::span<const uint8_t> { publicKey }, platformKey.span().subspan(bytesExpectedExternal)))
-            return nullptr;
-
-        KeyMaterial privateKey(seed);
-        privateKey.append(std::span<const uint8_t> { publicKey });
-        return adoptRef(*new CryptoKeyOKP(identifier, curve, type, WTF::move(privateKey), extractable, usages, WTF::move(rindKey)));
+        return createEd25519(type, WTF::move(key), extractable, usages);
     }
 
     if (platformKey.size() != bytesExpectedInternal)
@@ -99,14 +90,24 @@ RefPtr<CryptoKeyOKP> CryptoKeyOKP::create(CryptoAlgorithmIdentifier identifier, 
     return adoptRef(*new CryptoKeyOKP(identifier, curve, type, WTF::move(platformKey), extractable, usages));
 }
 
-CryptoKeyOKP::CryptoKeyOKP(CryptoAlgorithmIdentifier identifier, NamedCurve curve, CryptoKeyType type, KeyMaterial&& data, bool extractable, CryptoKeyUsageBitmap usages, Bun::Rind::Ed25519Key&& rindKey)
+Ref<CryptoKeyOKP> CryptoKeyOKP::createEd25519(CryptoKeyType type, Bun::Rind::Key&& key, bool extractable, CryptoKeyUsageBitmap usages)
+{
+    // The internal form of a private key is its seed, then its public key.
+    KeyMaterial data;
+    if (type == CryptoKeyType::Private)
+        data = Bun::Rind::privateKey(*key);
+    data.appendVector(Bun::Rind::publicKey(*key));
+    return adoptRef(*new CryptoKeyOKP(CryptoAlgorithmIdentifier::Ed25519, NamedCurve::Ed25519, type, WTF::move(data), extractable, usages, WTF::move(key)));
+}
+
+CryptoKeyOKP::CryptoKeyOKP(CryptoAlgorithmIdentifier identifier, NamedCurve curve, CryptoKeyType type, KeyMaterial&& data, bool extractable, CryptoKeyUsageBitmap usages, Bun::Rind::Key&& rindKey)
     : CryptoKey(identifier, type, extractable, usages)
     , m_curve(curve)
     , m_data(data)
     , m_exportKey(curve == NamedCurve::Ed25519 && type == CryptoKeyType::Private ? std::optional<Vector<uint8_t>>(Vector<uint8_t>(std::span { data.begin(), 32 })) : std::nullopt)
     , m_rindKey(WTF::move(rindKey))
 {
-    ASSERT(!!m_rindKey == (curve == NamedCurve::Ed25519 && type == CryptoKeyType::Private));
+    ASSERT(!!m_rindKey == (curve == NamedCurve::Ed25519));
 }
 
 ExceptionOr<CryptoKeyPair> CryptoKeyOKP::generatePair(CryptoAlgorithmIdentifier identifier, NamedCurve namedCurve, bool extractable, CryptoKeyUsageBitmap usages)

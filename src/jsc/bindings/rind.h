@@ -1,69 +1,148 @@
 #pragma once
 
-// Ed25519, and ECDSA on P-384 and P-521, run on rind (src/runtime/crypto/rind.rs),
-// which measures faster than BoringSSL at each. BoringSSL still parses and
-// encodes these keys: a rind key is built from the raw key it holds.
+// Ed25519, X25519, and ECDSA and ECDH on P-256, P-384, and P-521 run on rind
+// (src/runtime/crypto/rind.rs), which measures faster than BoringSSL at each.
+// rind parses and writes these keys in the encodings OpenSSL, BoringSSL, and
+// Node write; any other encoding is BoringSSL's to parse, as before, and the
+// rind key is then loaded from its raw parts. A BoringSSL key is built from
+// the rind key only for the paths still on BoringSSL.
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
+#include <wtf/Vector.h>
 #include "ncrypto.h"
 
-struct BunRindEd25519Key;
-struct BunRindEcdsaKey;
+struct BunRindKey;
+struct BunRindDigestContext;
+struct BunRindDigest;
 
-// Each curve signs with the SHA-2 hash of its size, and a signature is
-// r || s, each the curve's size (IEEE P1363).
-enum class BunRindCurve : uint8_t {
-    P384 = 0,
-    P521 = 1,
+enum class BunRindKind : uint8_t {
+    Ed25519 = 0,
+    X25519 = 1,
+    P256 = 2,
+    P384 = 3,
+    P521 = 4,
+    // Parsing only: whichever kind the encoding names.
+    Any = 255,
+};
+
+// The hashes rind signs and verifies ECDSA over.
+enum class BunRindHash : uint8_t {
+    SHA256 = 0,
+    SHA384 = 1,
+    SHA512 = 2,
+};
+
+enum class BunRindFormat : uint8_t {
+    PKCS8 = 0,
+    SPKI = 1,
+    SEC1 = 2,
 };
 
 extern "C" {
-BunRindEd25519Key* Bun__Rind__ed25519FromSeed(const uint8_t seed[32], uint8_t outPublic[32]);
-BunRindEd25519Key* Bun__Rind__ed25519Generate(uint8_t outSeed[32], uint8_t outPublic[32]);
-void Bun__Rind__ed25519Sign(const BunRindEd25519Key*, const uint8_t* message, size_t messageLen, uint8_t outSignature[64]);
-bool Bun__Rind__ed25519Verify(const uint8_t publicKey[32], const uint8_t* message, size_t messageLen, const uint8_t signature[64]);
-void Bun__Rind__ed25519Free(BunRindEd25519Key*);
+BunRindKey* Bun__Rind__keyGenerate(BunRindKind);
+BunRindKey* Bun__Rind__keyParse(BunRindKind, BunRindFormat, const uint8_t* der, size_t derLen);
+BunRindKey* Bun__Rind__keyFromPublic(BunRindKind, const uint8_t* publicKey, size_t publicKeyLen);
+BunRindKey* Bun__Rind__keyFromPrivate(BunRindKind, const uint8_t* privateKey, size_t privateKeyLen, const uint8_t* publicKey, size_t publicKeyLen);
+BunRindKey* Bun__Rind__keyPublicHalf(const BunRindKey*);
+void Bun__Rind__keyFree(BunRindKey*);
+BunRindKind Bun__Rind__keyKind(const BunRindKey*);
+bool Bun__Rind__keyIsPrivate(const BunRindKey*);
+size_t Bun__Rind__keyPublic(const BunRindKey*, uint8_t* out, size_t cap);
+size_t Bun__Rind__keyPrivate(const BunRindKey*, uint8_t* out, size_t cap);
+size_t Bun__Rind__keyExport(const BunRindKey*, BunRindFormat, uint8_t* out, size_t cap);
 
-BunRindEcdsaKey* Bun__Rind__ecdsaFromScalar(BunRindCurve, const uint8_t* scalar, size_t scalarLen, const uint8_t* point, size_t pointLen);
-BunRindEcdsaKey* Bun__Rind__ecdsaGenerate(BunRindCurve, uint8_t* outScalar, uint8_t* outPoint);
-bool Bun__Rind__ecdsaSign(const BunRindEcdsaKey*, const uint8_t* message, size_t messageLen, uint8_t* outSignature, size_t outSignatureLen);
-bool Bun__Rind__ecdsaVerify(BunRindCurve, const uint8_t* point, size_t pointLen, const uint8_t* message, size_t messageLen, const uint8_t* signature, size_t signatureLen);
-void Bun__Rind__ecdsaFree(BunRindEcdsaKey*);
+size_t Bun__Rind__sign(const BunRindKey*, BunRindHash, const uint8_t* message, size_t messageLen, uint8_t* out, size_t cap);
+bool Bun__Rind__verify(const BunRindKey*, BunRindHash, const uint8_t* message, size_t messageLen, const uint8_t* signature, size_t signatureLen);
+
+BunRindDigestContext* Bun__Rind__digestNew(BunRindHash);
+void Bun__Rind__digestUpdate(BunRindDigestContext*, const uint8_t* data, size_t len);
+BunRindDigest* Bun__Rind__digestFinish(BunRindDigestContext*);
+void Bun__Rind__digestContextFree(BunRindDigestContext*);
+size_t Bun__Rind__digestBytes(const BunRindDigest*, uint8_t out[64]);
+void Bun__Rind__digestFree(BunRindDigest*);
+size_t Bun__Rind__signDigest(const BunRindKey*, const BunRindDigest*, uint8_t* out, size_t cap);
+bool Bun__Rind__verifyDigest(const BunRindKey*, const BunRindDigest*, const uint8_t* signature, size_t signatureLen);
+
+size_t Bun__Rind__agree(const BunRindKey*, const uint8_t* peer, size_t peerLen, uint8_t* out, size_t cap);
+bool Bun__Rind__x25519(const uint8_t privateKey[32], const uint8_t peer[32], uint8_t out[32]);
 }
 
 namespace Bun::Rind {
 
-struct Ed25519KeyDeleter {
-    void operator()(BunRindEd25519Key* key) const { Bun__Rind__ed25519Free(key); }
+// A rind key, immutable once made, shared by every object that holds it.
+using Key = std::shared_ptr<const BunRindKey>;
+inline Key adopt(BunRindKey* key)
+{
+    if (!key)
+        return nullptr;
+    return Key(key, [](const BunRindKey* key) { Bun__Rind__keyFree(const_cast<BunRindKey*>(key)); });
+}
+
+struct DigestContextDeleter {
+    void operator()(BunRindDigestContext* context) const { Bun__Rind__digestContextFree(context); }
 };
-using Ed25519Key = std::unique_ptr<BunRindEd25519Key, Ed25519KeyDeleter>;
+using DigestContext = std::unique_ptr<BunRindDigestContext, DigestContextDeleter>;
 
-struct EcdsaKeyDeleter {
-    void operator()(BunRindEcdsaKey* key) const { Bun__Rind__ecdsaFree(key); }
+struct DigestDeleter {
+    void operator()(BunRindDigest* digest) const { Bun__Rind__digestFree(digest); }
 };
-using EcdsaKey = std::unique_ptr<BunRindEcdsaKey, EcdsaKeyDeleter>;
+using Digest = std::unique_ptr<BunRindDigest, DigestDeleter>;
 
-// The curve's size in bytes: its scalar, and each half of a signature.
-constexpr size_t scalarSize(BunRindCurve curve) { return curve == BunRindCurve::P384 ? 48 : 66; }
+// The longest encoding of a key here, P-521's PKCS#8, and of a signature, P-521's r || s.
+constexpr size_t maxEncodedSize = 256;
+constexpr size_t maxSignatureSize = 2 * 66;
+// A raw public key: 32 bytes, or P-521's uncompressed point at most.
+constexpr size_t maxPublicKeySize = 1 + 2 * 66;
 
-// The rind curve for a BoringSSL curve NID, if rind runs it.
-std::optional<BunRindCurve> curveForNid(int nid);
+inline bool isEc(BunRindKind kind) { return kind == BunRindKind::P256 || kind == BunRindKind::P384 || kind == BunRindKind::P521; }
 
-// The rind curve of an EC key, if rind runs it and `digestNid` is the hash it signs with.
-std::optional<BunRindCurve> curveForSigning(const EC_KEY*, int digestNid);
+// A NIST curve's size in bytes: its scalar, and each half of a signature.
+constexpr size_t scalarSize(BunRindKind kind) { return kind == BunRindKind::P256 ? 32 : kind == BunRindKind::P384 ? 48 : 66; }
 
-// The rind key pair for an EC private key on a curve rind runs.
-EcdsaKey ecdsaKey(const EC_KEY*);
+// The kind for a BoringSSL curve NID, if rind runs it.
+std::optional<BunRindKind> kindForCurveNid(int nid);
+int curveNidForKind(BunRindKind);
 
-// Generates a key pair into `key`, an EC key without one on a curve rind runs,
-// and returns rind's copy of it.
-EcdsaKey generateEcdsaKey(EC_KEY* key);
+// The rind hash for a BoringSSL digest, if rind signs over it.
+std::optional<BunRindHash> hashForDigest(const EVP_MD*);
+const EVP_MD* digestForHash(BunRindHash);
 
-// Verifies r || s over `message` with an EC public key.
-bool ecdsaVerify(BunRindCurve, const EC_KEY*, std::span<const uint8_t> message, std::span<const uint8_t> signature);
+// The kind of a BoringSSL key, if rind runs it.
+std::optional<BunRindKind> kindOf(const EVP_PKEY*);
+
+// Parses `der` with rind if it is an encoding rind writes; otherwise null,
+// and the caller takes BoringSSL's path.
+inline Key parse(BunRindKind kind, BunRindFormat format, std::span<const uint8_t> der)
+{
+    return adopt(Bun__Rind__keyParse(kind, format, der.data(), der.size()));
+}
+
+// rind's copy of a key BoringSSL holds, of a kind rind runs; null otherwise.
+// It loads the key again, so it is for keys BoringSSL had to parse.
+Key fromEVP(const EVP_PKEY*, bool includePrivate);
+
+// BoringSSL's copy of a rind key, for the paths still on BoringSSL. A NIST
+// curve's is built from the scalar and point without another scalar
+// multiplication.
+ncrypto::EVPKeyPointer toEVP(const BunRindKey&, bool includePrivate);
+// BoringSSL's EC_KEY for a NIST curve's rind key, built the same way; null for any other kind.
+ncrypto::ECKeyPointer toECKey(const BunRindKey&, bool includePrivate);
+
+// The raw public key: 32 bytes, or a NIST curve's uncompressed point.
+WTF::Vector<uint8_t> publicKey(const BunRindKey&);
+// The raw private key: Ed25519's seed, X25519's 32 bytes, or a NIST curve's scalar.
+WTF::Vector<uint8_t> privateKey(const BunRindKey&);
+// The key in `format`; empty if it has no such encoding.
+WTF::Vector<uint8_t> exportKey(const BunRindKey&, BunRindFormat);
+
+// r || s as DER, as BoringSSL's ECDSA_SIG_to_bytes writes it.
+ncrypto::DataPointer fixedToDer(std::span<const uint8_t> fixed);
+// A DER ECDSA signature as r || s of the curve's size, refused unless it
+// re-encodes to itself, as BoringSSL's ECDSA_verify requires.
+bool derToFixed(std::span<const uint8_t> der, size_t scalarSize, uint8_t* fixed);
 
 } // namespace Bun::Rind

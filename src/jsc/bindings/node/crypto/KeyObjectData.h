@@ -15,7 +15,15 @@ struct KeyObjectData : ThreadSafeRefCounted<KeyObjectData> {
     }
 
     KeyObjectData(ncrypto::EVPKeyPointer&& asymmetricKey)
-        : asymmetricKey(WTF::move(asymmetricKey))
+        : m_asymmetricKey(WTF::move(asymmetricKey))
+        , m_rindKind(Bun::Rind::kindOf(m_asymmetricKey.get()))
+    {
+    }
+
+    KeyObjectData(Bun::Rind::Key&& rindKey)
+        : m_rindKind(Bun__Rind__keyKind(rindKey.get()))
+        , m_fromRind(true)
+        , m_rindKey(WTF::move(rindKey))
     {
     }
 
@@ -32,51 +40,47 @@ public:
         return adoptRef(*new KeyObjectData(WTF::move(asymmetricKey)));
     }
 
-    WTF::Vector<uint8_t> symmetricKey;
-    const ncrypto::EVPKeyPointer asymmetricKey;
-
-    // rind's copy of an Ed25519 private key, built on first use; null for any other key.
-    const BunRindEd25519Key* rindEd25519Key() const
+    static RefPtr<KeyObjectData> create(Bun::Rind::Key&& rindKey)
     {
-        buildRindKey();
-        return m_rindEd25519.get();
+        return adoptRef(*new KeyObjectData(WTF::move(rindKey)));
     }
 
-    // rind's copy of a P-384 or P-521 private key, built on first use; null for any other key.
-    const BunRindEcdsaKey* rindEcdsaKey() const
+    WTF::Vector<uint8_t> symmetricKey;
+
+    // BoringSSL's copy of an asymmetric key, built on first use from rind's for the paths still on BoringSSL.
+    const ncrypto::EVPKeyPointer& asymmetricKey() const
     {
-        buildRindKey();
-        return m_rindEcdsa.get();
+        if (m_fromRind) {
+            std::call_once(m_asymmetricOnce, [this] {
+                m_asymmetricKey = Bun::Rind::toEVP(*m_rindKey, Bun__Rind__keyIsPrivate(m_rindKey.get()));
+            });
+        }
+        return m_asymmetricKey;
+    }
+
+    // Whether rind parsed or generated the key, so it holds the key's raw parts without BoringSSL.
+    bool fromRind() const { return m_fromRind; }
+
+    // The kind of an asymmetric key rind runs, known without building either copy.
+    std::optional<BunRindKind> rindKind() const { return m_rindKind; }
+
+    // rind's copy of a key of a kind it runs; loaded on first use from BoringSSL's when BoringSSL parsed it.
+    const BunRindKey* rindKey() const
+    {
+        if (!m_rindKind)
+            return nullptr;
+        std::call_once(m_rindOnce, [this] {
+            if (!m_fromRind)
+                m_rindKey = Bun::Rind::fromEVP(m_asymmetricKey.get(), true);
+        });
+        return m_rindKey.get();
     }
 
 private:
-    void buildRindKey() const
-    {
-        std::call_once(m_rindOnce, [this] {
-            EVP_PKEY* key = asymmetricKey.get();
-            if (!key)
-                return;
-            switch (EVP_PKEY_id(key)) {
-            case EVP_PKEY_ED25519: {
-                uint8_t seed[32];
-                uint8_t publicKey[32];
-                size_t seedLen = sizeof(seed);
-                if (!EVP_PKEY_get_raw_private_key(key, seed, &seedLen) || seedLen != sizeof(seed)) {
-                    ERR_clear_error();
-                    return;
-                }
-                m_rindEd25519.reset(Bun__Rind__ed25519FromSeed(seed, publicKey));
-                OPENSSL_cleanse(seed, sizeof(seed));
-                break;
-            }
-            case EVP_PKEY_EC:
-                m_rindEcdsa = Bun::Rind::ecdsaKey(EVP_PKEY_get0_EC_KEY(key));
-                break;
-            }
-        });
-    }
-
+    mutable std::once_flag m_asymmetricOnce;
+    mutable ncrypto::EVPKeyPointer m_asymmetricKey;
+    std::optional<BunRindKind> m_rindKind;
+    const bool m_fromRind { false };
     mutable std::once_flag m_rindOnce;
-    mutable Bun::Rind::Ed25519Key m_rindEd25519;
-    mutable Bun::Rind::EcdsaKey m_rindEcdsa;
+    mutable Bun::Rind::Key m_rindKey;
 };

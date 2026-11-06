@@ -40,19 +40,16 @@ void EcKeyPairJob::createAndSchedule(JSGlobalObject* globalObject, EcKeyPairJobC
     Bun__EcKeyPairJob__createAndSchedule(globalObject, ctxCopy, JSValue::encode(callback));
 }
 
-// Generates a P-384 or P-521 key with a named curve on rind. Returns false to
-// leave every other curve and parameter encoding to BoringSSL.
+// Generates a key on P-256, P-384, or P-521 with a named curve on rind. Returns false to leave every other curve
+// and parameter encoding to BoringSSL.
 bool EcKeyPairJobCtx::generateOnRind()
 {
-    if (m_paramEncoding != OPENSSL_EC_NAMED_CURVE || !Bun::Rind::curveForNid(m_curveNid))
+    auto kind = Bun::Rind::kindForCurveNid(m_curveNid);
+    if (m_paramEncoding != OPENSSL_EC_NAMED_CURVE || !kind)
         return false;
-    auto ecKey = ncrypto::ECKeyPointer::NewByCurveName(m_curveNid);
-    auto key = ncrypto::EVPKeyPointer::New();
-    if (!ecKey || !key || !Bun::Rind::generateEcdsaKey(ecKey.get()) || !key.set(ecKey)) {
-        m_opensslError = ERR_get_error();
-        return true;
-    }
-    m_keyObj = KeyObject::create(CryptoKeyType::Private, WTF::move(key));
+    auto key = Bun::Rind::adopt(Bun__Rind__keyGenerate(*kind));
+    if (key)
+        m_keyObj = KeyObject::create(CryptoKeyType::Private, KeyObjectData::create(WTF::move(key)));
     return true;
 }
 

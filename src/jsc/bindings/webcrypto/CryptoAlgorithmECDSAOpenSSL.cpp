@@ -34,15 +34,28 @@
 
 namespace WebCore {
 
+// rind signs and verifies over SHA-256, SHA-384, and SHA-512; SHA-1 stays on BoringSSL.
+static std::optional<BunRindHash> rindHash(CryptoAlgorithmIdentifier hash)
+{
+    switch (hash) {
+    case CryptoAlgorithmIdentifier::SHA_256:
+        return BunRindHash::SHA256;
+    case CryptoAlgorithmIdentifier::SHA_384:
+        return BunRindHash::SHA384;
+    case CryptoAlgorithmIdentifier::SHA_512:
+        return BunRindHash::SHA512;
+    default:
+        return std::nullopt;
+    }
+}
+
 ExceptionOr<Vector<uint8_t>> CryptoAlgorithmECDSA::platformSign(const CryptoAlgorithmEcdsaParams& parameters, const CryptoKeyEC& key, const Vector<uint8_t>& data)
 {
     size_t keySizeInBytes = (key.keySizeInBits() + 7) / 8;
 
-    if (CryptoKeyEC::rindCurve(key.namedCurve(), parameters.hashIdentifier)) {
-        if (!key.rindKey())
-            return Exception { OperationError };
+    if (auto hash = rindHash(parameters.hashIdentifier)) {
         Vector<uint8_t> signature(keySizeInBytes * 2);
-        if (!Bun__Rind__ecdsaSign(key.rindKey(), data.begin(), data.size(), signature.begin(), signature.size()))
+        if (Bun__Rind__sign(&key.rindKey(), *hash, data.begin(), data.size(), signature.begin(), signature.size()) != signature.size())
             return Exception { OperationError };
         return signature;
     }
@@ -83,8 +96,8 @@ ExceptionOr<bool> CryptoAlgorithmECDSA::platformVerify(const CryptoAlgorithmEcds
     if (signature.size() != keySizeInBytes * 2)
         return false;
 
-    if (auto curve = CryptoKeyEC::rindCurve(key.namedCurve(), parameters.hashIdentifier))
-        return Bun::Rind::ecdsaVerify(*curve, EVP_PKEY_get0_EC_KEY(key.platformKey()), data.span(), signature.span());
+    if (auto hash = rindHash(parameters.hashIdentifier))
+        return Bun__Rind__verify(&key.rindKey(), *hash, data.begin(), data.size(), signature.begin(), signature.size());
 
     auto sig = ECDSASigPtr(ECDSA_SIG_new());
     auto r = BN_bin2bn(signature.begin(), keySizeInBytes, nullptr);

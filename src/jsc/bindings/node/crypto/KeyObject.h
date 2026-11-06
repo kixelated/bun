@@ -117,7 +117,7 @@ public:
     inline WebCore::CryptoKeyType type() const { return m_type; }
     inline WebCore::CryptoKeyType& type() { return m_type; }
     const WTF::Vector<uint8_t>& symmetricKey() const { return m_data->symmetricKey; }
-    const ncrypto::EVPKeyPointer& asymmetricKey() const { return m_data->asymmetricKey; }
+    const ncrypto::EVPKeyPointer& asymmetricKey() const { return m_data->asymmetricKey(); }
     RefPtr<KeyObjectData> data() const { return m_data; }
 
 private:

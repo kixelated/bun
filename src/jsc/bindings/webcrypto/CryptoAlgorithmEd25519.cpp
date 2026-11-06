@@ -40,35 +40,26 @@ namespace WebCore {
 
 ExceptionOr<Vector<uint8_t>> CryptoAlgorithmEd25519::platformSign(const CryptoKeyOKP& key, const Vector<uint8_t>& data)
 {
-    if (!key.rindKey())
+    uint8_t signature[64];
+    if (!key.rindKey() || Bun__Rind__sign(key.rindKey(), BunRindHash::SHA512, data.begin(), data.size(), signature, sizeof(signature)) != sizeof(signature))
         return Exception { OperationError };
-
-    uint8_t newSignature[64];
-    Bun__Rind__ed25519Sign(key.rindKey(), data.begin(), data.size(), newSignature);
-    return Vector<uint8_t>(std::span { newSignature, 64 });
-}
-
-static ExceptionOr<bool> verifyEd25519(const Vector<uint8_t>& key, size_t keyLengthInBytes, const Vector<uint8_t>& signature, const Vector<uint8_t> data)
-{
-    if (key.size() != ED25519_PUBLIC_KEY_LEN || keyLengthInBytes != ED25519_PUBLIC_KEY_LEN)
-        return false;
-
-    if (signature.size() != keyLengthInBytes * 2)
-        return false;
-
-    if (!Bun__Rind__ed25519Verify(key.begin(), data.begin(), data.size(), signature.begin()))
-        return false;
-
-    // WPT WebCryptoAPI/sign_verify/eddsa_small_order_points.js
-    auto pkey = ncrypto::EVPKeyPointer::NewRawPublic(EVP_PKEY_ED25519, { key.begin(), key.size() });
-    if (!pkey)
-        return Exception { OperationError };
-    return !pkey.hasSmallOrderEdDsaPoint({ signature.begin(), signature.size() });
+    return Vector<uint8_t>(std::span { signature, 64 });
 }
 
 ExceptionOr<bool> CryptoAlgorithmEd25519::platformVerify(const CryptoKeyOKP& key, const Vector<uint8_t>& signature, const Vector<uint8_t>& data)
 {
-    return verifyEd25519(key.platformKey(), key.keySizeInBytes(), signature, data);
+    if (!key.rindKey() || signature.size() != 64)
+        return false;
+
+    if (!Bun__Rind__verify(key.rindKey(), BunRindHash::SHA512, data.begin(), data.size(), signature.begin(), signature.size()))
+        return false;
+
+    // WPT WebCryptoAPI/sign_verify/eddsa_small_order_points.js
+    auto& publicKey = key.platformKey();
+    auto pkey = ncrypto::EVPKeyPointer::NewRawPublic(EVP_PKEY_ED25519, { publicKey.begin(), publicKey.size() });
+    if (!pkey)
+        return Exception { OperationError };
+    return !pkey.hasSmallOrderEdDsaPoint({ signature.begin(), signature.size() });
 }
 
 Ref<CryptoAlgorithm> CryptoAlgorithmEd25519::create()

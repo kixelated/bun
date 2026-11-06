@@ -27,7 +27,17 @@ void DhJobCtx::runTask(JSGlobalObject* globalObject)
     // later unrelated operation would pick them up.
     ncrypto::ClearErrorOnReturn clearErrorOnReturn;
 
-    auto dp = DHPointer::stateless(m_privateKey->asymmetricKey, m_publicKey->asymmetricKey);
+    // rind refuses what BoringSSL does, which then fails the same way.
+    if (m_privateKey->fromRind() && m_publicKey->fromRind() && m_privateKey->rindKind() == m_publicKey->rindKind()) {
+        auto peer = Bun::Rind::publicKey(*m_publicKey->rindKey());
+        uint8_t secret[66];
+        if (size_t len = Bun__Rind__agree(m_privateKey->rindKey(), peer.begin(), peer.size(), secret, sizeof(secret))) {
+            m_result = ByteSource::allocated(ncrypto::DataPointer::FromSpan(std::span<const uint8_t> { secret, len }).release());
+            return;
+        }
+    }
+
+    auto dp = DHPointer::stateless(m_privateKey->asymmetricKey(), m_publicKey->asymmetricKey());
     if (!dp) {
         return;
     }
@@ -120,8 +130,13 @@ std::optional<DhJobCtx> DhJobCtx::fromJS(JSGlobalObject* globalObject, ThrowScop
             EVP_PKEY_X448,
             EVP_PKEY_X25519 });
 
-        int privateKeyType = privateKeyObject->handle().asymmetricKey().id();
-        int publicKeyType = publicKeyObject->handle().asymmetricKey().id();
+        auto keyType = [](const KeyObject& key) {
+            if (auto kind = key.data()->rindKind())
+                return Bun::Rind::isEc(*kind) ? EVP_PKEY_EC : *kind == BunRindKind::Ed25519 ? EVP_PKEY_ED25519 : EVP_PKEY_X25519;
+            return key.asymmetricKey().id();
+        };
+        int privateKeyType = keyType(privateKeyObject->handle());
+        int publicKeyType = keyType(publicKeyObject->handle());
 
         if (privateKeyType != publicKeyType || std::ranges::find(supportedKeyTypes, privateKeyType) == supportedKeyTypes.end()) {
             auto privateName = privateKeyObject->handle().asymmetricKeyType(globalObject).toWTFString(globalObject);

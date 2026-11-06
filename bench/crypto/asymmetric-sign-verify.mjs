@@ -33,6 +33,7 @@ const msg = new Uint8Array(64).fill(0x5a);
   await time("webcrypto Ed25519 importKey pkcs8", () => subtle.importKey("pkcs8", edPkcs8, { name: "Ed25519" }, true, ["sign"]));
   await time("webcrypto Ed25519 sign", () => subtle.sign({ name: "Ed25519" }, ed.privateKey, msg));
   await time("webcrypto Ed25519 verify", () => subtle.verify({ name: "Ed25519" }, ed.publicKey, edSig, msg));
+  await time("webcrypto Ed25519 exportKey jwk", () => subtle.exportKey("jwk", ed.privateKey));
 
   for (const [curve, hash] of [["P-256", "SHA-256"], ["P-384", "SHA-384"], ["P-521", "SHA-512"]]) {
     const alg = { name: "ECDSA", namedCurve: curve };
@@ -44,21 +45,29 @@ const msg = new Uint8Array(64).fill(0x5a);
     await time(`webcrypto ECDSA ${curve} importKey pkcs8 + one sign ${hash}`, async () => subtle.sign({ name: "ECDSA", hash }, await subtle.importKey("pkcs8", pkcs8, alg, true, ["sign"]), msg));
     await time(`webcrypto ECDSA ${curve} sign ${hash}`, () => subtle.sign({ name: "ECDSA", hash }, k.privateKey, msg));
     await time(`webcrypto ECDSA ${curve} verify ${hash}`, () => subtle.verify({ name: "ECDSA", hash }, k.publicKey, sig, msg));
-    if (curve !== "P-256") {
-      const sig256 = await subtle.sign({ name: "ECDSA", hash: "SHA-256" }, k.privateKey, msg);
-      await time(`webcrypto ECDSA ${curve} sign SHA-256 (control)`, () => subtle.sign({ name: "ECDSA", hash: "SHA-256" }, k.privateKey, msg));
-      await time(`webcrypto ECDSA ${curve} verify SHA-256 (control)`, () => subtle.verify({ name: "ECDSA", hash: "SHA-256" }, k.publicKey, sig256, msg));
-    }
+    const other = curve === "P-256" ? "SHA-384" : "SHA-256";
+    const sigOther = await subtle.sign({ name: "ECDSA", hash: other }, k.privateKey, msg);
+    await time(`webcrypto ECDSA ${curve} sign ${other}`, () => subtle.sign({ name: "ECDSA", hash: other }, k.privateKey, msg));
+    await time(`webcrypto ECDSA ${curve} verify ${other}`, () => subtle.verify({ name: "ECDSA", hash: other }, k.publicKey, sigOther, msg));
+    const spki = await subtle.exportKey("spki", k.publicKey);
+    const raw = await subtle.exportKey("raw", k.publicKey);
+    const jwk = await subtle.exportKey("jwk", k.privateKey);
+    await time(`webcrypto ECDSA ${curve} importKey spki`, () => subtle.importKey("spki", spki, alg, true, ["verify"]));
+    await time(`webcrypto ECDSA ${curve} importKey raw`, () => subtle.importKey("raw", raw, alg, true, ["verify"]));
+    await time(`webcrypto ECDSA ${curve} importKey jwk private`, () => subtle.importKey("jwk", jwk, alg, true, ["sign"]));
+    await time(`webcrypto ECDSA ${curve} exportKey pkcs8`, () => subtle.exportKey("pkcs8", k.privateKey));
+    await time(`webcrypto ECDSA ${curve} exportKey spki`, () => subtle.exportKey("spki", k.publicKey));
+    await time(`webcrypto ECDSA ${curve} exportKey jwk private`, () => subtle.exportKey("jwk", k.privateKey));
     const ecdh = { name: "ECDH", namedCurve: curve };
     const a = await subtle.generateKey(ecdh, true, ["deriveBits"]);
     const b = await subtle.generateKey(ecdh, true, ["deriveBits"]);
     await time(`webcrypto ECDH ${curve} generateKey`, () => subtle.generateKey(ecdh, true, ["deriveBits"]));
-    await time(`webcrypto ECDH ${curve} deriveBits (control)`, () => subtle.deriveBits({ name: "ECDH", public: b.publicKey }, a.privateKey, null));
+    await time(`webcrypto ECDH ${curve} deriveBits`, () => subtle.deriveBits({ name: "ECDH", public: b.publicKey }, a.privateKey, null));
   }
   const xa = await subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
   const xb = await subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
-  await time("webcrypto X25519 generateKey (control)", () => subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]));
-  await time("webcrypto X25519 deriveBits (control)", () => subtle.deriveBits({ name: "X25519", public: xb.publicKey }, xa.privateKey, 256));
+  await time("webcrypto X25519 generateKey", () => subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]));
+  await time("webcrypto X25519 deriveBits", () => subtle.deriveBits({ name: "X25519", public: xb.publicKey }, xa.privateKey, 256));
 }
 
 // node:crypto, with KeyObjects made once.
@@ -69,7 +78,11 @@ const msg = new Uint8Array(64).fill(0x5a);
   await time("node Ed25519 verify", () => crypto.verify(null, msg, ed.publicKey, edSig));
   const edPem = ed.privateKey.export({ type: "pkcs8", format: "pem" });
   await time("node Ed25519 sign, PEM key each call", () => crypto.sign(null, msg, edPem));
-  await time("node Ed25519 generateKeyPairSync (control)", () => crypto.generateKeyPairSync("ed25519"));
+  await time("node Ed25519 generateKeyPairSync", () => crypto.generateKeyPairSync("ed25519"));
+  const xa = crypto.generateKeyPairSync("x25519");
+  const xb = crypto.generateKeyPairSync("x25519");
+  await time("node X25519 generateKeyPairSync", () => crypto.generateKeyPairSync("x25519"));
+  await time("node X25519 diffieHellman", () => crypto.diffieHellman({ privateKey: xa.privateKey, publicKey: xb.publicKey }));
   for (const [curve, hash] of [["P-256", "sha256"], ["P-384", "sha384"], ["P-521", "sha512"]]) {
     const k = crypto.generateKeyPairSync("ec", { namedCurve: curve });
     const der = crypto.sign(hash, msg, k.privateKey);
@@ -81,5 +94,22 @@ const msg = new Uint8Array(64).fill(0x5a);
     const pem = k.privateKey.export({ type: "pkcs8", format: "pem" });
     await time(`node ECDSA ${curve} sign ${hash}, PEM key each call`, () => crypto.sign(hash, msg, pem));
     await time(`node ECDSA ${curve} generateKeyPairSync`, () => crypto.generateKeyPairSync("ec", { namedCurve: curve }));
+    await time(`node ECDSA ${curve} createSign ${hash}`, () => crypto.createSign(hash).update(msg).sign(k.privateKey));
+    await time(`node ECDSA ${curve} createVerify ${hash}`, () => crypto.createVerify(hash).update(msg).verify(k.publicKey, der));
+    await time(`node ECDSA ${curve} createPrivateKey pem`, () => crypto.createPrivateKey(pem));
+    const spkiPem = k.publicKey.export({ type: "spki", format: "pem" });
+    await time(`node ECDSA ${curve} createPublicKey pem`, () => crypto.createPublicKey(spkiPem));
+    await time(`node ECDSA ${curve} export pkcs8 pem`, () => k.privateKey.export({ type: "pkcs8", format: "pem" }));
+    await time(`node ECDSA ${curve} export sec1 der`, () => k.privateKey.export({ type: "sec1", format: "der" }));
+    await time(`node ECDSA ${curve} export jwk`, () => k.privateKey.export({ format: "jwk" }));
+    const peer = crypto.generateKeyPairSync("ec", { namedCurve: curve });
+    await time(`node ECDH ${curve} diffieHellman`, () => crypto.diffieHellman({ privateKey: k.privateKey, publicKey: peer.publicKey }));
+    const name = { "P-256": "prime256v1", "P-384": "secp384r1", "P-521": "secp521r1" }[curve];
+    const ea = crypto.createECDH(name);
+    const eb = crypto.createECDH(name);
+    ea.generateKeys();
+    const ebPublic = eb.generateKeys();
+    await time(`node ECDH ${curve} createECDH generateKeys`, () => crypto.createECDH(name).generateKeys());
+    await time(`node ECDH ${curve} computeSecret`, () => ea.computeSecret(ebPublic));
   }
 }

@@ -52,6 +52,19 @@ JSC_DEFINE_HOST_FUNCTION(jsECDHProtoFuncGenerateKeys, (JSC::JSGlobalObject * glo
         return {};
     }
 
+    if (auto kind = Bun::Rind::kindForCurveNid(EC_GROUP_get_curve_name(ecdh->m_group))) {
+        auto key = Bun::Rind::adopt(Bun__Rind__keyGenerate(*kind));
+        auto ec = key ? Bun::Rind::toECKey(*key, true) : ncrypto::ECKeyPointer();
+        if (!ec) {
+            throwError(globalObject, scope, ErrorCode::ERR_CRYPTO_OPERATION_FAILED, "Failed to generate ECDH key pair"_s);
+            return {};
+        }
+        ecdh->m_key = WTF::move(ec);
+        ecdh->m_group = ecdh->m_key.getGroup();
+        ecdh->m_rindKey = WTF::move(key);
+        return ecdh->getPublicKey(globalObject, scope, callFrame->argument(0), callFrame->argument(1));
+    }
+
     // Get a copy of the key we can modify
     if (!ecdh->m_key.generate()) {
         throwError(globalObject, scope, ErrorCode::ERR_CRYPTO_OPERATION_FAILED, "Failed to generate ECDH key pair"_s);
@@ -91,6 +104,17 @@ JSC_DEFINE_HOST_FUNCTION(jsECDHProtoFuncComputeSecret, (JSC::JSGlobalObject * gl
     if (!keyBuffer) {
         throwError(globalObject, scope, ErrorCode::ERR_INVALID_ARG_TYPE, "Key argument must be an ArrayBuffer or ArrayBufferView"_s);
         return {};
+    }
+
+    // A key pair rind generated is valid, and rind refuses what BoringSSL does, which then reports it.
+    if (ecdh->m_rindKey) {
+        auto keySpan = keyBuffer->span();
+        uint8_t secret[66];
+        if (size_t len = Bun__Rind__agree(ecdh->m_rindKey.get(), keySpan.data(), keySpan.size(), secret, sizeof(secret))) {
+            BufferEncodingType outputEncodingType = Bun::getEncodingDefaultBuffer(globalObject, scope, outputEncodingValue);
+            RETURN_IF_EXCEPTION(scope, {});
+            RELEASE_AND_RETURN(scope, StringBytes::encode(globalObject, scope, std::span<const uint8_t> { secret, len }, outputEncodingType));
+        }
     }
 
     // Validate that we have a valid key pair
@@ -261,6 +285,7 @@ JSC_DEFINE_HOST_FUNCTION(jsECDHProtoFuncSetPublicKey, (JSC::JSGlobalObject * glo
         throwError(globalObject, scope, ErrorCode::ERR_CRYPTO_OPERATION_FAILED, "Failed to set EC_POINT as the public key"_s);
         return {};
     }
+    ecdh->m_rindKey = nullptr;
 
     // Return this for chaining
     return JSValue::encode(callFrame->thisValue());
@@ -351,6 +376,7 @@ JSC_DEFINE_HOST_FUNCTION(jsECDHProtoFuncSetPrivateKey, (JSC::JSGlobalObject * gl
     // Replace the old key with the new one
     ecdh->m_key = WTF::move(newKey);
     ecdh->m_group = ecdh->m_key.getGroup();
+    ecdh->m_rindKey = nullptr;
 
     // Return this for chaining
     return JSValue::encode(callFrame->thisValue());

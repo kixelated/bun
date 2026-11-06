@@ -265,12 +265,14 @@ JSC_DEFINE_HOST_FUNCTION(jsGenerateKeyPairSync, (JSGlobalObject * globalObject, 
         auto ctx = NidKeyPairJobCtx::fromJS(globalObject, scope, typeView, optionsValue, config);
         EXCEPTION_ASSERT(ctx.has_value() == !scope.exception());
         RETURN_IF_EXCEPTION(scope, {});
-        ncrypto::EVPKeyCtxPointer keyCtx = ctx->setup();
-        if (!keyCtx) {
-            throwCryptoError(globalObject, scope, ctx->err());
-            return {};
+        if (!ctx->generateOnRind()) {
+            ncrypto::EVPKeyCtxPointer keyCtx = ctx->setup();
+            if (!keyCtx) {
+                throwCryptoError(globalObject, scope, ctx->err());
+                return {};
+            }
+            ctx->runTask(globalObject, keyCtx);
         }
-        ctx->runTask(globalObject, keyCtx);
         if (!ctx->m_keyObj.data()) {
             throwCryptoError(globalObject, scope, ctx->err());
             return {};

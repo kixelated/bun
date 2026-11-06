@@ -14,8 +14,6 @@ namespace Bun::Rind {
 std::optional<BunRindKind> kindForCurveNid(int nid)
 {
     switch (nid) {
-    case NID_X9_62_prime256v1:
-        return BunRindKind::P256;
     case NID_secp384r1:
         return BunRindKind::P384;
     case NID_secp521r1:
@@ -28,8 +26,6 @@ std::optional<BunRindKind> kindForCurveNid(int nid)
 int curveNidForKind(BunRindKind kind)
 {
     switch (kind) {
-    case BunRindKind::P256:
-        return NID_X9_62_prime256v1;
     case BunRindKind::P384:
         return NID_secp384r1;
     case BunRindKind::P521:

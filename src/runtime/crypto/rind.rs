@@ -36,13 +36,12 @@ unsafe fn write(src: &[u8], out: *mut u8, cap: usize) -> usize {
 enum Kind {
     Ed25519 = 0,
     X25519 = 1,
-    P256 = 2,
     P384 = 3,
     P521 = 4,
 }
 
 impl Kind {
-    const ALL: [Kind; 5] = [Kind::Ed25519, Kind::X25519, Kind::P256, Kind::P384, Kind::P521];
+    const ALL: [Kind; 4] = [Kind::Ed25519, Kind::X25519, Kind::P384, Kind::P521];
 
     /// The kind C++ names, or `None` for `BunRindKind::Any` and anything else.
     fn from_c(kind: u8) -> Option<Self> {
@@ -51,7 +50,6 @@ impl Kind {
 
     fn ecdsa(self) -> &'static signature::EcdsaSigningAlgorithm {
         match self {
-            Kind::P256 => &signature::sign::ECDSA_P256_SHA256_FIXED,
             Kind::P384 => &signature::sign::ECDSA_P384_SHA384_FIXED,
             _ => &signature::sign::ECDSA_P521_SHA512_FIXED,
         }
@@ -60,7 +58,6 @@ impl Kind {
     fn verify(self) -> &'static signature::VerificationAlgorithm {
         match self {
             Kind::Ed25519 => &signature::verify::ED25519,
-            Kind::P256 => &signature::verify::ECDSA_P256_SHA256_FIXED,
             Kind::P384 => &signature::verify::ECDSA_P384_SHA384_FIXED,
             _ => &signature::verify::ECDSA_P521_SHA512_FIXED,
         }
@@ -69,14 +66,13 @@ impl Kind {
     fn agreement(self) -> &'static agreement::Algorithm {
         match self {
             Kind::X25519 => &agreement::X25519,
-            Kind::P256 => &agreement::ECDH_P256,
             Kind::P384 => &agreement::ECDH_P384,
             _ => &agreement::ECDH_P521,
         }
     }
 
     fn is_ec(self) -> bool {
-        matches!(self, Kind::P256 | Kind::P384 | Kind::P521)
+        matches!(self, Kind::P384 | Kind::P521)
     }
 }
 

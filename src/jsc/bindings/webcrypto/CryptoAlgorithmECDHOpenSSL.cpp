@@ -35,14 +35,40 @@ namespace WebCore {
 
 std::optional<Vector<uint8_t>> CryptoAlgorithmECDH::platformDeriveBits(const CryptoKeyEC& baseKey, const CryptoKeyEC& publicKey)
 {
-    auto peer = Bun::Rind::publicKey(publicKey.rindKey());
-    uint8_t secret[66];
-    size_t len = Bun__Rind__agree(&baseKey.rindKey(), peer.begin(), peer.size(), secret, sizeof(secret));
-    if (!len)
+    if (baseKey.rindKey() && publicKey.rindKey()) {
+        auto peer = Bun::Rind::publicKey(*publicKey.rindKey());
+        uint8_t secret[66];
+        size_t len = Bun__Rind__agree(baseKey.rindKey(), peer.begin(), peer.size(), secret, sizeof(secret));
+        if (!len)
+            return std::nullopt;
+        Vector<uint8_t> result(std::span<const uint8_t> { secret, len });
+        OPENSSL_cleanse(secret, sizeof(secret));
+        return result;
+    }
+
+    auto ctx = EvpPKeyCtxPtr(EVP_PKEY_CTX_new(baseKey.platformKey(), nullptr));
+    if (!ctx)
         return std::nullopt;
-    Vector<uint8_t> result(std::span<const uint8_t> { secret, len });
-    OPENSSL_cleanse(secret, sizeof(secret));
-    return result;
+
+    if (EVP_PKEY_derive_init(ctx.get()) <= 0)
+        return std::nullopt;
+
+    if (EVP_PKEY_derive_set_peer(ctx.get(), publicKey.platformKey()) <= 0)
+        return std::nullopt;
+
+    // Call with a nullptr to get the required buffer size.
+    size_t keyLen;
+    if (EVP_PKEY_derive(ctx.get(), nullptr, &keyLen) <= 0)
+        return std::nullopt;
+
+    Vector<uint8_t> key(keyLen);
+    if (EVP_PKEY_derive(ctx.get(), key.begin(), &keyLen) <= 0)
+        return std::nullopt;
+
+    // Shrink the buffer since the new keyLen may differ from the buffer size.
+    key.shrink(keyLen);
+
+    return key;
 }
 
 } // namespace WebCore

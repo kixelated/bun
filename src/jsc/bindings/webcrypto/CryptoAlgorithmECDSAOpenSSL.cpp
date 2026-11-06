@@ -53,9 +53,9 @@ ExceptionOr<Vector<uint8_t>> CryptoAlgorithmECDSA::platformSign(const CryptoAlgo
 {
     size_t keySizeInBytes = (key.keySizeInBits() + 7) / 8;
 
-    if (auto hash = rindHash(parameters.hashIdentifier)) {
+    if (auto hash = rindHash(parameters.hashIdentifier); hash && key.rindKey()) {
         Vector<uint8_t> signature(keySizeInBytes * 2);
-        if (Bun__Rind__sign(&key.rindKey(), *hash, data.begin(), data.size(), signature.begin(), signature.size()) != signature.size())
+        if (Bun__Rind__sign(key.rindKey(), *hash, data.begin(), data.size(), signature.begin(), signature.size()) != signature.size())
             return Exception { OperationError };
         return signature;
     }
@@ -96,8 +96,8 @@ ExceptionOr<bool> CryptoAlgorithmECDSA::platformVerify(const CryptoAlgorithmEcds
     if (signature.size() != keySizeInBytes * 2)
         return false;
 
-    if (auto hash = rindHash(parameters.hashIdentifier))
-        return Bun__Rind__verify(&key.rindKey(), *hash, data.begin(), data.size(), signature.begin(), signature.size());
+    if (auto hash = rindHash(parameters.hashIdentifier); hash && key.rindKey())
+        return Bun__Rind__verify(key.rindKey(), *hash, data.begin(), data.size(), signature.begin(), signature.size());
 
     auto sig = ECDSASigPtr(ECDSA_SIG_new());
     auto r = BN_bin2bn(signature.begin(), keySizeInBytes, nullptr);

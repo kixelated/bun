@@ -40,8 +40,8 @@ using namespace JSC;
 using namespace ncrypto;
 using namespace WebCore;
 
-// The DER in a PEM block of a key encoding rind parses, as OpenSSL, BoringSSL, and Node write it: the block
-// first, with no headers. Anything else is BoringSSL's to read.
+// The DER in a PEM block of a key encoding rind parses, as OpenSSL, BoringSSL, and Node write it: one block
+// alone, with no headers. Anything else, such as a bundle BoringSSL picks one block from, is BoringSSL's to read.
 static std::optional<std::pair<BunRindFormat, WTF::Vector<uint8_t>>> rindPemToDer(std::span<const uint8_t> pem, bool allowPublic)
 {
     std::string_view text { reinterpret_cast<const char*>(pem.data()), pem.size() };
@@ -67,6 +67,10 @@ static std::optional<std::pair<BunRindFormat, WTF::Vector<uint8_t>>> rindPemToDe
     size_t bodyEnd = text.find(end, bodyStart);
     if (bodyEnd == std::string_view::npos)
         return std::nullopt;
+    for (char c : text.substr(bodyEnd + end.size())) {
+        if (!isASCIIWhitespace(c))
+            return std::nullopt;
+    }
 
     WTF::Vector<uint8_t> base64;
     for (char c : text.substr(bodyStart, bodyEnd - bodyStart)) {
@@ -377,7 +381,7 @@ JSC::JSValue KeyObject::exportJwkEcKey(JSC::JSGlobalObject* lexicalGlobalObject,
         RETURN_IF_EXCEPTION(scope, {});
         auto crvKey = commonStrings.jwkCrvString()->value(lexicalGlobalObject);
         RETURN_IF_EXCEPTION(scope, {});
-        jwk->putDirect(vm, Identifier::fromString(vm, crvKey), jsString(vm, String(kind == BunRindKind::P256 ? "P-256"_s : kind == BunRindKind::P384 ? "P-384"_s : "P-521"_s)));
+        jwk->putDirect(vm, Identifier::fromString(vm, crvKey), jsString(vm, String(kind == BunRindKind::P384 ? "P-384"_s : "P-521"_s)));
         if (exportType == CryptoKeyType::Private) {
             auto d = Bun::Rind::privateKey(key);
             put(commonStrings.jwkDString(), d.span());

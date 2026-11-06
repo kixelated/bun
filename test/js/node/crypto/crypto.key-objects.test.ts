@@ -2036,8 +2036,8 @@ test.each([
 });
 
 test("createPublicKey takes the public key of a PEM bundle that starts with a private key", () => {
-  const first = generateKeyPairSync("ec", { namedCurve: "P-256" });
-  const second = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const first = generateKeyPairSync("ec", { namedCurve: "P-384" });
+  const second = generateKeyPairSync("ec", { namedCurve: "P-384" });
   const bundle =
     first.privateKey.export({ type: "pkcs8", format: "pem" }) + second.publicKey.export({ type: "spki", format: "pem" });
   expect(createPublicKey(bundle).equals(second.publicKey)).toBe(true);

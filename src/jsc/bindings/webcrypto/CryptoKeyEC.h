@@ -73,11 +73,10 @@ public:
     size_t keySizeInBits() const;
     NamedCurve namedCurve() const { return m_curve; }
     String namedCurveString() const;
-    // BoringSSL's key: a P-256 key's only one, or a copy of rind's built on first use, for the paths still on BoringSSL.
+    // BoringSSL's copy of the key, built on first use, for the paths still on BoringSSL.
     PlatformECKey platformKey() const;
-    // rind's key, except on P-256, which stays on BoringSSL.
-    const BunRindKey* rindKey() const { return m_rindKey.get(); }
-    static std::optional<BunRindKind> rindKind(NamedCurve);
+    const BunRindKey& rindKey() const { return *m_rindKey; }
+    static BunRindKind rindKind(NamedCurve);
     static bool isValidECAlgorithm(CryptoAlgorithmIdentifier);
     static RefPtr<CryptoKeyEC> platformImportSpki(CryptoAlgorithmIdentifier, NamedCurve, Vector<uint8_t>&& keyData, bool extractable, CryptoKeyUsageBitmap, bool* keyTypeMismatch, bool* curveMismatch);
     static RefPtr<CryptoKeyEC> platformImportPkcs8(CryptoAlgorithmIdentifier, NamedCurve, Vector<uint8_t>&& keyData, bool extractable, CryptoKeyUsageBitmap, bool* keyTypeMismatch, bool* curveMismatch);

@@ -58,7 +58,7 @@ CryptoKeyEC::CryptoKeyEC(CryptoAlgorithmIdentifier identifier, NamedCurve curve,
 {
     // Only CryptoKeyEC objects for supported curves should be created.
     ASSERT(platformSupportedCurve(curve));
-    ASSERT(m_rindKey ? Bun__Rind__keyKind(m_rindKey.get()) == rindKind(curve) : !rindKind(curve) && m_platformKey);
+    ASSERT(m_rindKey && Bun__Rind__keyKind(m_rindKey.get()) == rindKind(curve));
 }
 
 PlatformECKey CryptoKeyEC::platformKey() const
@@ -70,11 +70,11 @@ PlatformECKey CryptoKeyEC::platformKey() const
     return m_platformKey.get();
 }
 
-std::optional<BunRindKind> CryptoKeyEC::rindKind(NamedCurve curve)
+BunRindKind CryptoKeyEC::rindKind(NamedCurve curve)
 {
     switch (curve) {
     case NamedCurve::P256:
-        return std::nullopt;
+        return BunRindKind::P256;
     case NamedCurve::P384:
         return BunRindKind::P384;
     case NamedCurve::P521:

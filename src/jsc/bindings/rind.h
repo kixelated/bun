@@ -1,9 +1,7 @@
 #pragma once
 
-// Ed25519, X25519, and ECDSA and ECDH on P-384 and P-521 run on rind
+// Ed25519, X25519, and ECDSA and ECDH on P-256, P-384, and P-521 run on rind
 // (src/runtime/crypto/rind.rs), which measures faster than BoringSSL at each.
-// P-256 stays on BoringSSL: rind generates its keys slower and verifies no
-// faster.
 // rind parses and writes these keys in the encodings OpenSSL, BoringSSL, and
 // Node write; any other encoding is BoringSSL's to parse, as before, and the
 // rind key is then loaded from its raw parts. A BoringSSL key is built from
@@ -24,6 +22,7 @@ struct BunRindDigest;
 enum class BunRindKind : uint8_t {
     Ed25519 = 0,
     X25519 = 1,
+    P256 = 2,
     P384 = 3,
     P521 = 4,
     // Parsing only: whichever kind the encoding names.
@@ -99,10 +98,10 @@ constexpr size_t maxSignatureSize = 2 * 66;
 // A raw public key: 32 bytes, or P-521's uncompressed point at most.
 constexpr size_t maxPublicKeySize = 1 + 2 * 66;
 
-inline bool isEc(BunRindKind kind) { return kind == BunRindKind::P384 || kind == BunRindKind::P521; }
+inline bool isEc(BunRindKind kind) { return kind == BunRindKind::P256 || kind == BunRindKind::P384 || kind == BunRindKind::P521; }
 
 // A NIST curve's size in bytes: its scalar, and each half of a signature.
-constexpr size_t scalarSize(BunRindKind kind) { return kind == BunRindKind::P384 ? 48 : 66; }
+constexpr size_t scalarSize(BunRindKind kind) { return kind == BunRindKind::P256 ? 32 : kind == BunRindKind::P384 ? 48 : 66; }
 
 // The kind for a BoringSSL curve NID, if rind runs it.
 std::optional<BunRindKind> kindForCurveNid(int nid);

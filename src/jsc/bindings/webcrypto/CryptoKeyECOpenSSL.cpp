@@ -101,47 +101,9 @@ bool CryptoKeyEC::platformSupportedCurve(NamedCurve curve)
     return curve == NamedCurve::P256 || curve == NamedCurve::P384 || curve == NamedCurve::P521;
 }
 
-// P-256 keeps BoringSSL's key alone, as before.
-static std::optional<CryptoKeyPair> generatePairOnBoringSSL(CryptoAlgorithmIdentifier identifier, CryptoKeyEC::NamedCurve curve, bool extractable, CryptoKeyUsageBitmap usages)
-{
-    // To generate a key pair, we generate a private key and extract the public key from the private key.
-    auto privateECKey = createECKey(curve);
-    if (!privateECKey)
-        return std::nullopt;
-
-    if (EC_KEY_generate_key(privateECKey.get()) <= 0)
-        return std::nullopt;
-
-    auto point = ECPointPtr(EC_POINT_dup(EC_KEY_get0_public_key(privateECKey.get()), EC_KEY_get0_group(privateECKey.get())));
-    if (!point)
-        return std::nullopt;
-
-    auto publicECKey = createECKey(curve);
-    if (!publicECKey)
-        return std::nullopt;
-
-    if (EC_KEY_set_public_key(publicECKey.get(), point.get()) <= 0)
-        return std::nullopt;
-
-    auto privatePKey = EvpPKeyPtr(EVP_PKEY_new());
-    if (EVP_PKEY_set1_EC_KEY(privatePKey.get(), privateECKey.get()) <= 0)
-        return std::nullopt;
-
-    auto publicPKey = EvpPKeyPtr(EVP_PKEY_new());
-    if (EVP_PKEY_set1_EC_KEY(publicPKey.get(), publicECKey.get()) <= 0)
-        return std::nullopt;
-
-    auto publicKey = CryptoKeyEC::create(identifier, curve, CryptoKeyType::Public, nullptr, true, usages, WTF::move(publicPKey));
-    auto privateKey = CryptoKeyEC::create(identifier, curve, CryptoKeyType::Private, nullptr, extractable, usages, WTF::move(privatePKey));
-    return CryptoKeyPair { WTF::move(publicKey), WTF::move(privateKey) };
-}
-
 std::optional<CryptoKeyPair> CryptoKeyEC::platformGeneratePair(CryptoAlgorithmIdentifier identifier, NamedCurve curve, bool extractable, CryptoKeyUsageBitmap usages)
 {
-    auto kind = rindKind(curve);
-    if (!kind)
-        return generatePairOnBoringSSL(identifier, curve, extractable, usages);
-    auto privateKey = Bun::Rind::adopt(Bun__Rind__keyGenerate(*kind));
+    auto privateKey = Bun::Rind::adopt(Bun__Rind__keyGenerate(rindKind(curve)));
     if (!privateKey)
         return std::nullopt;
     auto publicKey = Bun::Rind::adopt(Bun__Rind__keyPublicHalf(privateKey.get()));
@@ -151,11 +113,9 @@ std::optional<CryptoKeyPair> CryptoKeyEC::platformGeneratePair(CryptoAlgorithmId
     };
 }
 
-// A key BoringSSL parsed, with rind's copy loaded from its raw parts, except on P-256.
+// A key BoringSSL parsed, with rind's copy loaded from its raw parts.
 static RefPtr<CryptoKeyEC> createFromPlatformKey(CryptoAlgorithmIdentifier identifier, CryptoKeyEC::NamedCurve curve, CryptoKeyType type, EvpPKeyPtr&& pkey, bool extractable, CryptoKeyUsageBitmap usages)
 {
-    if (!CryptoKeyEC::rindKind(curve))
-        return CryptoKeyEC::create(identifier, curve, type, nullptr, extractable, usages, WTF::move(pkey));
     auto rindKey = Bun::Rind::fromEVP(pkey.get(), type == CryptoKeyType::Private);
     if (!rindKey)
         return nullptr;
@@ -164,40 +124,16 @@ static RefPtr<CryptoKeyEC> createFromPlatformKey(CryptoAlgorithmIdentifier ident
 
 RefPtr<CryptoKeyEC> CryptoKeyEC::platformImportRaw(CryptoAlgorithmIdentifier identifier, NamedCurve curve, Vector<uint8_t>&& keyData, bool extractable, CryptoKeyUsageBitmap usages)
 {
-    if (auto kind = rindKind(curve)) {
-        auto key = Bun::Rind::adopt(Bun__Rind__keyFromPublic(*kind, keyData.begin(), keyData.size()));
-        if (!key)
-            return nullptr;
-        return create(identifier, curve, CryptoKeyType::Public, WTF::move(key), extractable, usages);
-    }
-
-    auto key = createECKey(curve);
+    auto key = Bun::Rind::adopt(Bun__Rind__keyFromPublic(rindKind(curve), keyData.begin(), keyData.size()));
     if (!key)
         return nullptr;
-
-    auto group = EC_KEY_get0_group(key.get());
-    auto point = ECPointPtr(EC_POINT_new(group));
-    // Load an EC point from the keyData. This point is used as a public key.
-    if (EC_POINT_oct2point(group, point.get(), keyData.begin(), keyData.size(), nullptr) <= 0)
-        return nullptr;
-
-    if (EC_KEY_set_public_key(key.get(), point.get()) <= 0)
-        return nullptr;
-
-    if (EC_KEY_check_key(key.get()) <= 0)
-        return nullptr;
-
-    auto pkey = EvpPKeyPtr(EVP_PKEY_new());
-    if (EVP_PKEY_set1_EC_KEY(pkey.get(), key.get()) <= 0)
-        return nullptr;
-
-    return createFromPlatformKey(identifier, curve, CryptoKeyType::Public, WTF::move(pkey), extractable, usages);
+    return create(identifier, curve, CryptoKeyType::Public, WTF::move(key), extractable, usages);
 }
 
 RefPtr<CryptoKeyEC> CryptoKeyEC::platformImportJWKPublic(CryptoAlgorithmIdentifier identifier, NamedCurve curve, Vector<uint8_t>&& x, Vector<uint8_t>&& y, bool extractable, CryptoKeyUsageBitmap usages)
 {
-    auto kind = rindKind(curve);
-    if (kind && x.size() == Bun::Rind::scalarSize(*kind) && y.size() == Bun::Rind::scalarSize(*kind)) {
+    size_t size = Bun::Rind::scalarSize(rindKind(curve));
+    if (x.size() == size && y.size() == size) {
         Vector<uint8_t> point { 0x04 };
         point.appendVector(x);
         point.appendVector(y);
@@ -231,13 +167,12 @@ RefPtr<CryptoKeyEC> CryptoKeyEC::platformImportJWKPublic(CryptoAlgorithmIdentifi
 
 RefPtr<CryptoKeyEC> CryptoKeyEC::platformImportJWKPrivate(CryptoAlgorithmIdentifier identifier, NamedCurve curve, Vector<uint8_t>&& x, Vector<uint8_t>&& y, Vector<uint8_t>&& d, bool extractable, CryptoKeyUsageBitmap usages)
 {
-    auto kind = rindKind(curve);
-    size_t size = kind ? Bun::Rind::scalarSize(*kind) : 0;
-    if (kind && x.size() == size && y.size() == size && d.size() == size) {
+    size_t size = Bun::Rind::scalarSize(rindKind(curve));
+    if (x.size() == size && y.size() == size && d.size() == size) {
         Vector<uint8_t> point { 0x04 };
         point.appendVector(x);
         point.appendVector(y);
-        auto key = Bun::Rind::adopt(Bun__Rind__keyFromPrivate(*kind, d.begin(), d.size(), point.begin(), point.size()));
+        auto key = Bun::Rind::adopt(Bun__Rind__keyFromPrivate(rindKind(curve), d.begin(), d.size(), point.begin(), point.size()));
         if (!key)
             return nullptr;
         return create(identifier, curve, CryptoKeyType::Private, WTF::move(key), extractable, usages);
@@ -306,10 +241,8 @@ static bool supportedAlgorithmIdentifier(CryptoAlgorithmIdentifier identifier, c
 
 RefPtr<CryptoKeyEC> CryptoKeyEC::platformImportSpki(CryptoAlgorithmIdentifier identifier, NamedCurve curve, Vector<uint8_t>&& keyData, bool extractable, CryptoKeyUsageBitmap usages, bool* keyTypeMismatch, bool* curveMismatch)
 {
-    if (auto kind = rindKind(curve)) {
-        if (auto key = Bun::Rind::parse(*kind, BunRindFormat::SPKI, keyData.span()))
-            return create(identifier, curve, CryptoKeyType::Public, WTF::move(key), extractable, usages);
-    }
+    if (auto key = Bun::Rind::parse(rindKind(curve), BunRindFormat::SPKI, keyData.span()))
+        return create(identifier, curve, CryptoKeyType::Public, WTF::move(key), extractable, usages);
 
     // In this function we extract the subjectPublicKey after verifying that the algorithm in the SPKI data
     // match the given identifier and curve. Then construct an EC key with the named curve and set the public key.
@@ -425,10 +358,8 @@ RefPtr<CryptoKeyEC> CryptoKeyEC::platformImportSpki(CryptoAlgorithmIdentifier id
 
 RefPtr<CryptoKeyEC> CryptoKeyEC::platformImportPkcs8(CryptoAlgorithmIdentifier identifier, NamedCurve curve, Vector<uint8_t>&& keyData, bool extractable, CryptoKeyUsageBitmap usages, bool* keyTypeMismatch, bool* curveMismatch)
 {
-    if (auto kind = rindKind(curve)) {
-        if (auto key = Bun::Rind::parse(*kind, BunRindFormat::PKCS8, keyData.span()))
-            return create(identifier, curve, CryptoKeyType::Private, WTF::move(key), extractable, usages);
-    }
+    if (auto key = Bun::Rind::parse(rindKind(curve), BunRindFormat::PKCS8, keyData.span()))
+        return create(identifier, curve, CryptoKeyType::Private, WTF::move(key), extractable, usages);
 
     // We need a local pointer variable to pass to d2i (DER to internal) functions().
     const uint8_t* ptr = keyData.begin();
@@ -469,55 +400,12 @@ RefPtr<CryptoKeyEC> CryptoKeyEC::platformImportPkcs8(CryptoAlgorithmIdentifier i
 
 Vector<uint8_t> CryptoKeyEC::platformExportRaw() const
 {
-    if (m_rindKey)
-        return Bun::Rind::publicKey(*m_rindKey);
-
-    EC_KEY* key = EVP_PKEY_get0_EC_KEY(platformKey());
-    if (!key)
-        return {};
-
-    const EC_POINT* point = EC_KEY_get0_public_key(key);
-    const EC_GROUP* group = EC_KEY_get0_group(key);
-    size_t keyDataSize = EC_POINT_point2oct(group, point, POINT_CONVERSION_UNCOMPRESSED, nullptr, 0, nullptr);
-    if (!keyDataSize)
-        return {};
-
-    Vector<uint8_t> keyData(keyDataSize);
-    if (EC_POINT_point2oct(group, point, POINT_CONVERSION_UNCOMPRESSED, keyData.begin(), keyData.size(), nullptr) != keyDataSize)
-        return {};
-
-    return keyData;
+    return Bun::Rind::publicKey(*m_rindKey);
 }
 
 bool CryptoKeyEC::platformAddFieldElements(JsonWebKey& jwk) const
 {
-    if (!m_rindKey) {
-        size_t keySizeInBytes = (keySizeInBits() + 7) / 8;
-
-        EC_KEY* key = EVP_PKEY_get0_EC_KEY(platformKey());
-        if (!key)
-            return false;
-
-        const EC_POINT* publicKey = EC_KEY_get0_public_key(key);
-        if (publicKey) {
-            auto ctx = BNCtxPtr(BN_CTX_new());
-            auto x = BIGNUMPtr(BN_new());
-            auto y = BIGNUMPtr(BN_new());
-            if (1 == EC_POINT_get_affine_coordinates_GFp(EC_KEY_get0_group(key), publicKey, x.get(), y.get(), ctx.get())) {
-                jwk.x = Bun::base64URLEncodeToString(convertToBytesExpand(x.get(), keySizeInBytes));
-                jwk.y = Bun::base64URLEncodeToString(convertToBytesExpand(y.get(), keySizeInBytes));
-            }
-        }
-
-        if (type() == Type::Private) {
-            const BIGNUM* privateKey = EC_KEY_get0_private_key(key);
-            if (privateKey)
-                jwk.d = Bun::base64URLEncodeToString(convertToBytesExpand(privateKey, keySizeInBytes));
-        }
-        return true;
-    }
-
-    size_t size = Bun::Rind::scalarSize(*rindKind(m_curve));
+    size_t size = Bun::Rind::scalarSize(rindKind(m_curve));
     auto point = Bun::Rind::publicKey(*m_rindKey);
     if (point.size() != 1 + 2 * size)
         return false;
@@ -538,54 +426,14 @@ Vector<uint8_t> CryptoKeyEC::platformExportSpki() const
 {
     if (type() != CryptoKeyType::Public)
         return {};
-    if (m_rindKey)
-        return Bun::Rind::exportKey(*m_rindKey, BunRindFormat::SPKI);
-
-    int len = i2d_PUBKEY(platformKey(), nullptr);
-    if (len < 0)
-        return {};
-
-    Vector<uint8_t> keyData(len);
-    auto ptr = keyData.begin();
-    if (i2d_PUBKEY(platformKey(), &ptr) < 0)
-        return {};
-
-    return keyData;
+    return Bun::Rind::exportKey(*m_rindKey, BunRindFormat::SPKI);
 }
 
 Vector<uint8_t> CryptoKeyEC::platformExportPkcs8() const
 {
     if (type() != CryptoKeyType::Private)
         return {};
-    if (m_rindKey)
-        return Bun::Rind::exportKey(*m_rindKey, BunRindFormat::PKCS8);
-
-    // A key that came without its optional public key has a flag that leaves it out again. As in ncrypto's
-    // Ec::ExportPrivatePkcs8, a copy without the flag is what is encoded. One that came with a compressed point
-    // would keep that form too.
-    auto ecKey = ECKeyPtr(EC_KEY_dup(EVP_PKEY_get0_EC_KEY(platformKey())));
-    if (!ecKey)
-        return {};
-    EC_KEY_set_enc_flags(ecKey.get(), EC_KEY_get_enc_flags(ecKey.get()) & ~EC_PKEY_NO_PUBKEY);
-    EC_KEY_set_conv_form(ecKey.get(), POINT_CONVERSION_UNCOMPRESSED);
-    auto pkey = EvpPKeyPtr(EVP_PKEY_new());
-    if (!pkey || EVP_PKEY_set1_EC_KEY(pkey.get(), ecKey.get()) != 1)
-        return {};
-
-    auto p8inf = PKCS8PrivKeyInfoPtr(EVP_PKEY2PKCS8(pkey.get()));
-    if (!p8inf)
-        return {};
-
-    int len = i2d_PKCS8_PRIV_KEY_INFO(p8inf.get(), nullptr);
-    if (len < 0)
-        return {};
-
-    Vector<uint8_t> keyData(len);
-    auto ptr = keyData.begin();
-    if (i2d_PKCS8_PRIV_KEY_INFO(p8inf.get(), &ptr) < 0)
-        return {};
-
-    return keyData;
+    return Bun::Rind::exportKey(*m_rindKey, BunRindFormat::PKCS8);
 }
 
 } // namespace WebCore

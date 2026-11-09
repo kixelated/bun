@@ -381,7 +381,7 @@ JSC::JSValue KeyObject::exportJwkEcKey(JSC::JSGlobalObject* lexicalGlobalObject,
         RETURN_IF_EXCEPTION(scope, {});
         auto crvKey = commonStrings.jwkCrvString()->value(lexicalGlobalObject);
         RETURN_IF_EXCEPTION(scope, {});
-        jwk->putDirect(vm, Identifier::fromString(vm, crvKey), jsString(vm, String(kind == BunRindKind::P384 ? "P-384"_s : "P-521"_s)));
+        jwk->putDirect(vm, Identifier::fromString(vm, crvKey), jsString(vm, String(kind == BunRindKind::P256 ? "P-256"_s : kind == BunRindKind::P384 ? "P-384"_s : "P-521"_s)));
         if (exportType == CryptoKeyType::Private) {
             auto d = Bun::Rind::privateKey(key);
             put(commonStrings.jwkDString(), d.span());

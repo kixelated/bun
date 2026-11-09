@@ -3133,6 +3133,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "libcrux-sha2"
+version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86aa35d8fc9576a41df34af4d95d1f11186c1f65cd6c829329748915ea556d71"
+dependencies = [
+ "libcrux-hacl-rs",
+ "libcrux-macros",
+ "libcrux-traits",
+]
+
+[[package]]
 name = "libcrux-traits"
 version = "0.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3499,8 +3510,9 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rind"
-version = "0.1.13"
-source = "git+https://github.com/moq-dev/rind?rev=ba5ea58ea6836397238a61a2784ba2619d7aae0d#ba5ea58ea6836397238a61a2784ba2619d7aae0d"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e056ace5683dfa2e78b0c3b73cbb80ceb08496a3d537a4bfeeb6e16504270d5"
 dependencies = [
  "cfg-if",
  "curve25519-dalek",
@@ -3511,6 +3523,7 @@ dependencies = [
  "libcrux-hacl-rs",
  "libcrux-macros",
  "libcrux-poly1305",
+ "libcrux-sha2",
  "libcrux-traits",
 ]
 

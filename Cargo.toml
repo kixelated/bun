@@ -357,7 +357,7 @@ map_identity = "allow"
 rust-argon2 = { path = "vendor/rust-argon2" }
 bcrypt = "0.19"
 getrandom = "0.4"
-rind = { git = "https://github.com/moq-dev/rind", rev = "ba5ea58ea6836397238a61a2784ba2619d7aae0d" }
+rind = { version = "0.3.2", features = ["wipe"] }
 strum = { version = "0.26", features = ["derive"] }
 # `allocator-api2` feature gives `hashbrown::HashMap<K, V, S, A>` an externally-
 # implementable `A` bound. We can't use hashbrown's own `nightly` feature (which

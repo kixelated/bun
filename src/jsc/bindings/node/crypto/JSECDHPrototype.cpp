@@ -54,13 +54,11 @@ JSC_DEFINE_HOST_FUNCTION(jsECDHProtoFuncGenerateKeys, (JSC::JSGlobalObject * glo
 
     if (auto kind = Bun::Rind::kindForCurveNid(EC_GROUP_get_curve_name(ecdh->m_group))) {
         auto key = Bun::Rind::adopt(Bun__Rind__keyGenerate(*kind));
-        auto ec = key ? Bun::Rind::toECKey(*key, true) : ncrypto::ECKeyPointer();
-        if (!ec) {
+        if (!key) {
             throwError(globalObject, scope, ErrorCode::ERR_CRYPTO_OPERATION_FAILED, "Failed to generate ECDH key pair"_s);
             return {};
         }
-        ecdh->m_key = WTF::move(ec);
-        ecdh->m_group = ecdh->m_key.getGroup();
+        ecdh->m_key = {};
         ecdh->m_rindKey = WTF::move(key);
         return ecdh->getPublicKey(globalObject, scope, callFrame->argument(0), callFrame->argument(1));
     }
@@ -119,7 +117,7 @@ JSC_DEFINE_HOST_FUNCTION(jsECDHProtoFuncComputeSecret, (JSC::JSGlobalObject * gl
 
     // Validate that we have a valid key pair
     ncrypto::MarkPopErrorOnReturn markPopErrorOnReturn;
-    if (!ecdh->m_key.checkKey()) {
+    if (!ecdh->key().checkKey()) {
         return Bun::ERR::CRYPTO_INVALID_KEYPAIR(scope, globalObject);
     }
 
@@ -151,7 +149,7 @@ JSC_DEFINE_HOST_FUNCTION(jsECDHProtoFuncComputeSecret, (JSC::JSGlobalObject * gl
     }
 
     // Compute the shared secret
-    int written = ECDH_compute_key(secret.begin(), secret.size(), pubPoint, ecdh->m_key.get(), nullptr);
+    int written = ECDH_compute_key(secret.begin(), secret.size(), pubPoint, ecdh->key().get(), nullptr);
     if (written != static_cast<int>(secret.size())) {
         return Bun::ERR::CRYPTO_OPERATION_FAILED(scope, globalObject, "Failed to compute ECDH key"_s);
     }
@@ -195,7 +193,7 @@ JSC_DEFINE_HOST_FUNCTION(jsECDHProtoFuncGetPrivateKey, (JSC::JSGlobalObject * gl
     }
 
     // Get the private key as a BIGNUM
-    const BIGNUM* privKey = ecdh->m_key.getPrivateKey();
+    const BIGNUM* privKey = ecdh->key().getPrivateKey();
     if (!privKey) {
         throwError(globalObject, scope, ErrorCode::ERR_CRYPTO_INVALID_STATE, "Failed to get ECDH private key"_s);
         return {};
@@ -281,7 +279,7 @@ JSC_DEFINE_HOST_FUNCTION(jsECDHProtoFuncSetPublicKey, (JSC::JSGlobalObject * glo
     }
 
     // Set the public key
-    if (!ecdh->m_key.setPublicKey(pubPoint)) {
+    if (!ecdh->key().setPublicKey(pubPoint)) {
         throwError(globalObject, scope, ErrorCode::ERR_CRYPTO_OPERATION_FAILED, "Failed to set EC_POINT as the public key"_s);
         return {};
     }
@@ -335,7 +333,7 @@ JSC_DEFINE_HOST_FUNCTION(jsECDHProtoFuncSetPrivateKey, (JSC::JSGlobalObject * gl
     }
 
     // Clone the existing key
-    auto newKey = ecdh->m_key.clone();
+    auto newKey = ecdh->key().clone();
     if (!newKey) {
         throwError(globalObject, scope, ErrorCode::ERR_CRYPTO_OPERATION_FAILED, "Failed to clone EC key"_s);
         return {};

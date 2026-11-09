@@ -60,9 +60,17 @@ EncodedJSValue JSECDH::getPublicKey(JSGlobalObject* globalObject, ThrowScope& sc
     point_conversion_form_t form = JSECDH::getFormat(globalObject, scope, formatValue);
     RETURN_IF_EXCEPTION(scope, {});
 
+    if (m_rindKey && form == POINT_CONVERSION_UNCOMPRESSED) {
+        uint8_t point[Bun::Rind::maxPublicKeySize];
+        size_t len = Bun__Rind__keyPublic(m_rindKey.get(), point, sizeof(point));
+        BufferEncodingType encodingType = getEncodingDefaultBuffer(globalObject, scope, encodingValue);
+        RETURN_IF_EXCEPTION(scope, {});
+        RELEASE_AND_RETURN(scope, StringBytes::encode(globalObject, scope, std::span<const uint8_t> { point, len }, encodingType));
+    }
+
     // Get the group and public key
-    const auto group = m_key.getGroup();
-    const auto pubKey = m_key.getPublicKey();
+    const auto group = key().getGroup();
+    const auto pubKey = key().getPublicKey();
     if (!pubKey) {
         throwError(globalObject, scope, ErrorCode::ERR_CRYPTO_INVALID_STATE, "Failed to get ECDH public key"_s);
         return {};

@@ -4,7 +4,7 @@
 //! from its raw parts only for the paths still on BoringSSL.
 
 use core::slice;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use rind::agreement;
 use rind::digest;
@@ -120,16 +120,38 @@ enum Private {
 /// An asymmetric key: a private key with its public key, or a public key.
 pub(crate) struct Key {
     kind: Kind,
+    /// False for a public key, including the public half of a private key,
+    /// which shares its `Material`.
+    is_private: bool,
+    material: Arc<Material>,
+}
+
+struct Material {
     private: Option<Private>,
     /// The raw public key: 32 bytes, or a NIST curve's uncompressed point.
-    public: agreement::PublicKey,
+    /// A private key derives it on first read, as rind and BoringSSL put off
+    /// a generated key's public key; a pair's halves share it.
+    public: OnceLock<Option<agreement::PublicKey>>,
     /// Built on first verification: parsing an Ed25519 point costs more than
     /// BoringSSL's import, which defers that to verification too.
     verifier: OnceLock<Option<signature::PublicKey>>,
 }
 
 impl Key {
-    fn new(kind: Kind, private: Option<Private>, public: &[u8]) -> Option<Box<Self>> {
+    fn new(kind: Kind, private: Option<Private>, public: OnceLock<Option<agreement::PublicKey>>) -> Box<Self> {
+        Box::new(Key {
+            kind,
+            is_private: private.is_some(),
+            material: Arc::new(Material {
+                private,
+                public,
+                verifier: OnceLock::new(),
+            }),
+        })
+    }
+
+    /// A public key from its raw bytes.
+    fn public(kind: Kind, public: &[u8]) -> Option<Box<Self>> {
         // Ed25519's raw public key is any 32 bytes until a signature is
         // checked against it, as BoringSSL holds it; X25519's parser takes
         // the same.
@@ -138,28 +160,40 @@ impl Key {
             kind => kind,
         };
         let public = agreement::PublicKey::new(parse_as.agreement(), public).ok()?;
-        Some(Box::new(Key {
-            kind,
-            private,
-            public,
-            verifier: OnceLock::new(),
-        }))
+        Some(Self::new(kind, None, OnceLock::from(Some(public))))
     }
 
     fn ec(kind: Kind, key: EcdsaKeyPair) -> Option<Box<Self>> {
         let ecdh = agreement::PrivateKey::from_scalar(kind.agreement(), key.to_scalar().as_ref()).ok()?;
-        let public = key.public_key();
-        Self::new(kind, Some(Private::Ec(key, ecdh)), public.as_ref())
+        Some(Self::new(kind, Some(Private::Ec(key, ecdh)), OnceLock::new()))
     }
 
     fn ed25519(key: Ed25519KeyPair) -> Option<Box<Self>> {
-        let public = key.public_key();
-        Self::new(Kind::Ed25519, Some(Private::Ed25519(key)), public.as_ref())
+        Some(Self::new(Kind::Ed25519, Some(Private::Ed25519(key)), OnceLock::new()))
     }
 
     fn x25519(key: agreement::PrivateKey) -> Option<Box<Self>> {
-        let public = key.public_key();
-        Self::new(Kind::X25519, Some(Private::X25519(key)), public.as_ref())
+        Some(Self::new(Kind::X25519, Some(Private::X25519(key)), OnceLock::new()))
+    }
+
+    fn private(&self) -> Option<&Private> {
+        self.material.private.as_ref().filter(|_| self.is_private)
+    }
+
+    /// The raw public key; `None` only if rind refuses the public key of a
+    /// private key it loaded, which it does not.
+    fn public_key(&self) -> Option<&agreement::PublicKey> {
+        self.material
+            .public
+            .get_or_init(|| {
+                let (algorithm, public) = match self.material.private.as_ref()? {
+                    Private::Ed25519(key) => (&agreement::X25519, key.public_key()),
+                    Private::X25519(key) => return Some(key.public_key()),
+                    Private::Ec(key, _) => (self.kind.agreement(), key.public_key()),
+                };
+                agreement::PublicKey::new(algorithm, public.as_ref()).ok()
+            })
+            .as_ref()
     }
 
     fn generate(kind: Kind) -> Option<Box<Self>> {
@@ -188,11 +222,11 @@ impl Key {
             // Its one encoding, which BoringSSL takes without checking the point.
             (Format::Spki, Kind::Ed25519) => {
                 let public = der.strip_prefix(&ED25519_SPKI_PREFIX)?;
-                Self::new(Kind::Ed25519, None, public)
+                Self::public(Kind::Ed25519, public)
             }
             (Format::Spki, kind) => {
                 let key = agreement::PublicKey::from_spki(kind.agreement(), der).ok()?;
-                Self::new(kind, None, key.as_ref())
+                Some(Self::new(kind, None, OnceLock::from(Some(key))))
             }
         }?;
         let mut encoded = [0u8; MAX_ENCODED_LEN];
@@ -201,8 +235,9 @@ impl Key {
     }
 
     fn verifier(&self) -> Option<&signature::PublicKey> {
-        self.verifier
-            .get_or_init(|| signature::PublicKey::new(self.kind.verify(), self.public.as_ref()).ok())
+        self.material
+            .verifier
+            .get_or_init(|| signature::PublicKey::new(self.kind.verify(), self.public_key()?.as_ref()).ok())
             .as_ref()
     }
 
@@ -213,7 +248,7 @@ impl Key {
             dst.copy_from_slice(src);
             Some(src.len())
         };
-        match (format, &self.private) {
+        match (format, self.private()) {
             (Format::Pkcs8, Some(Private::Ed25519(key))) => put(key.to_pkcs8v1().as_ref()),
             (Format::Pkcs8, Some(Private::X25519(key))) => put(key.to_pkcs8().as_ref()),
             (Format::Pkcs8, Some(Private::Ec(key, _))) => put(key.to_pkcs8().as_ref()),
@@ -222,10 +257,10 @@ impl Key {
                 let len = ED25519_SPKI_PREFIX.len();
                 let dst = out.get_mut(..len + 32)?;
                 dst[..len].copy_from_slice(&ED25519_SPKI_PREFIX);
-                dst[len..].copy_from_slice(self.public.as_ref());
+                dst[len..].copy_from_slice(self.public_key()?.as_ref());
                 Some(len + 32)
             }
-            (Format::Spki, _) => put(self.public.to_spki().as_ref()),
+            (Format::Spki, _) => put(self.public_key()?.to_spki().as_ref()),
             _ => None,
         }
     }
@@ -273,7 +308,7 @@ pub(crate) extern "C" fn Bun__Rind__keyFromPublic(
     public_len: usize,
 ) -> Option<Box<Key>> {
     // SAFETY: C++ passes the key's span.
-    Key::new(Kind::from_c(kind)?, None, unsafe { bytes(public, public_len) })
+    Key::public(Kind::from_c(kind)?, unsafe { bytes(public, public_len) })
 }
 
 /// Loads a private key from its raw bytes: Ed25519's seed, X25519's 32
@@ -301,17 +336,17 @@ pub(crate) extern "C" fn Bun__Rind__keyFromPrivate(
             );
         }
     }?;
-    (public.is_empty() || key.public.as_ref() == public).then_some(key)
+    (public.is_empty() || key.public_key()?.as_ref() == public).then_some(key)
 }
 
-/// The public half of `key`, as its own key.
+/// The public half of `key`, as its own key. It shares `key`'s material, so
+/// neither half derives the public key again once the other has.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn Bun__Rind__keyPublicHalf(key: &Key) -> Box<Key> {
     Box::new(Key {
         kind: key.kind,
-        private: None,
-        public: key.public.clone(),
-        verifier: OnceLock::new(),
+        is_private: false,
+        material: key.material.clone(),
     })
 }
 
@@ -327,14 +362,17 @@ pub(crate) extern "C" fn Bun__Rind__keyKind(key: &Key) -> u8 {
 
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn Bun__Rind__keyIsPrivate(key: &Key) -> bool {
-    key.private.is_some()
+    key.private().is_some()
 }
 
 /// Writes the raw public key, returning its length (0 if it does not fit).
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn Bun__Rind__keyPublic(key: &Key, out: *mut u8, cap: usize) -> usize {
-    // SAFETY: C++ passes a writable buffer of `cap` bytes.
-    unsafe { write(key.public.as_ref(), out, cap) }
+    match key.public_key() {
+        // SAFETY: C++ passes a writable buffer of `cap` bytes.
+        Some(public) => unsafe { write(public.as_ref(), out, cap) },
+        None => 0,
+    }
 }
 
 /// Writes the raw private key: Ed25519's seed, X25519's 32 bytes, or a NIST
@@ -343,7 +381,7 @@ pub(crate) extern "C" fn Bun__Rind__keyPublic(key: &Key, out: *mut u8, cap: usiz
 pub(crate) extern "C" fn Bun__Rind__keyPrivate(key: &Key, out: *mut u8, cap: usize) -> usize {
     // SAFETY: C++ passes a writable buffer of `cap` bytes.
     unsafe {
-        match &key.private {
+        match key.private() {
             Some(Private::Ed25519(key)) => write(key.to_seed().as_ref(), out, cap),
             Some(Private::X25519(key)) => write(key.to_scalar().as_ref(), out, cap),
             Some(Private::Ec(key, _)) => write(key.to_scalar().as_ref(), out, cap),
@@ -382,7 +420,7 @@ pub(crate) extern "C" fn Bun__Rind__sign(
 ) -> usize {
     // SAFETY: C++ passes the message's span.
     let message = unsafe { bytes(message, message_len) };
-    let signature = match &key.private {
+    let signature = match key.private() {
         Some(Private::Ed25519(key)) => key.sign(message),
         Some(Private::Ec(key, _)) => {
             let Some(hash) = hash_from_c(hash) else {
@@ -468,7 +506,7 @@ pub(crate) extern "C" fn Bun__Rind__signDigest(
     out: *mut u8,
     cap: usize,
 ) -> usize {
-    let Some(Private::Ec(key, _)) = &key.private else {
+    let Some(Private::Ec(key, _)) = key.private() else {
         return 0;
     };
     match key.sign_digest(digest) {
@@ -510,7 +548,7 @@ pub(crate) extern "C" fn Bun__Rind__agree(
     out: *mut u8,
     cap: usize,
 ) -> usize {
-    let private = match &key.private {
+    let private = match key.private() {
         Some(Private::X25519(key)) => key,
         Some(Private::Ec(_, key)) => key,
         _ => return 0,

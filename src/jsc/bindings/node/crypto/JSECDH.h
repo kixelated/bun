@@ -39,10 +39,18 @@ public:
         return WebCore::subspaceForImpl<JSECDH, WebCore::UseCustomHeapCellType::No>(vm, BUN_SUBSPACE_SLOTS(m_clientSubspaceForJSECDH, m_subspaceForJSECDH));
     }
 
+    // Null while m_rindKey holds a key pair rind generated, until key() builds it.
     ncrypto::ECKeyPointer m_key;
     const EC_GROUP* m_group;
-    // rind's copy of m_key while it holds a key pair rind generated; null once either half is set.
+    // The key pair rind generated, if it still holds it; null once either half is set.
     Bun::Rind::Key m_rindKey;
+
+    ncrypto::ECKeyPointer& key()
+    {
+        if (!m_key && m_rindKey)
+            m_key = Bun::Rind::toECKey(*m_rindKey, true);
+        return m_key;
+    }
     size_t m_sizeForGC { 0 };
 
     JSC::EncodedJSValue getPublicKey(JSC::JSGlobalObject*, JSC::ThrowScope&, JSC::JSValue encodingValue, JSC::JSValue formatValue);
